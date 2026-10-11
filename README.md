@@ -4,44 +4,62 @@
 
 支持英文项目目录、个人偏好、可复用资产和环境复用。视频默认在本地处理，不自动上传、购买服务或覆盖其他项目。
 
-## 安装
+## 新手从这里开始
 
-需要能读取 Skill 并执行本机命令的 AI 助手。以下以 Codex 为例；仓库根目录就是 Skill 根目录。克隆只安装 Skill 文件，不包含运行环境、语音模型或用户素材。
+**[直接下载 Skill 压缩包](https://github.com/zhaidike123456ai-ux/xx3zdjj/releases/latest/download/xx3zdjj-skill.zip)** · **[完整安装与 Agent 使用教程](docs/GETTING_STARTED.md)** · **[查看发布版本](https://github.com/zhaidike123456ai-ux/xx3zdjj/releases/latest)**
 
-已有同名目录时先保留修改并对比版本；下面的命令会停止，不覆盖旧版。
+这是给 **能读取本机文件、执行本机命令的 AI Agent** 使用的 Skill，例如本地 Codex、Claude Code、Cursor Agent。普通网页聊天里上传 ZIP，不等于安装到本机。先准备好你自己的 Agent；剪映工程验收还需要在同一台电脑上安装剪映。
 
-### macOS
+### 第一步：让 Agent 帮你安装（推荐）
 
-在终端执行（需要 Git）：
+把下面整段复制到 Agent 的聊天框，不需要自己敲终端命令：
 
-```bash
-skill_target="${CODEX_HOME:-$HOME/.codex}/skills/xx3zdjj"
-if [ -e "$skill_target" ] || [ -L "$skill_target" ]; then
-  echo "目标已存在，请先保留旧版并检查差异：$skill_target"
-else
-  mkdir -p "$(dirname "$skill_target")"
-  git clone https://github.com/zhaidike123456ai-ux/xx3zdjj.git "$skill_target"
-fi
+```text
+请从这个公开仓库安装 xx3zdjj Skill：
+https://github.com/zhaidike123456ai-ux/xx3zdjj
+
+仓库根目录就是 Skill 根目录。请下载完整内容，把包含 SKILL.md、scripts、references、assets 的文件夹以 xx3zdjj 为名，安装到当前 Agent 支持的用户级技能目录。
+先确认你正在使用哪种 Agent、哪个本地系统，并采用该宿主实际支持的目录。如果已有同名版本，先告诉我并保留我的修改，不直接覆盖。
+安装后核对全部资源完整、能发现并读取这个 Skill，告诉我最终安装路径和调用方法；如果需要刷新或开启新会话，请说明。
+本次先只读检测依赖。已有可用环境直接复用；缺失项列出来源、安装位置和预计空间，等我确认再补装。不要上传我的视频、自动付费或开始剪辑。
 ```
 
-### Windows
+Codex 也可在消息开头加 `$skill-installer` 来调用它的安装器；仓库路径是根目录，技能名称是 `xx3zdjj`。[官方说明](https://learn.chatgpt.com/docs/build-skills)
 
-在 PowerShell 执行（需要 Git）：
+### 第二步：确认安装成功
 
-```powershell
-$skillRoot = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'skills' } else { Join-Path $HOME '.codex/skills' }
-$skillTarget = Join-Path $skillRoot 'xx3zdjj'
-if (Test-Path -LiteralPath $skillTarget) { throw "目标已存在，请先保留旧版并检查差异：$skillTarget" }
-New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
-git clone https://github.com/zhaidike123456ai-ux/xx3zdjj.git "$skillTarget"
-if ($LASTEXITCODE -ne 0) { throw 'Git clone 失败，请查看上方错误。' }
+让 Agent 回答：“你是否能找到 xx3zdjj？请读取它的 SKILL.md，并给出真实安装路径。”
+
+安装后的文件夹应是下图结构，**不能只下载 SKILL.md，也不要多套一层 xx3zdjj 文件夹**：
+
+```text
+你的技能目录/
+└── xx3zdjj/
+    ├── SKILL.md
+    ├── scripts/
+    ├── references/
+    ├── assets/
+    └── agents/
 ```
 
-也可以下载 [Release](https://github.com/zhaidike123456ai-ux/xx3zdjj/releases) 中的 Skill 压缩包，把其中的 `xx3zdjj` 文件夹放到上述 skills 目录。不要合并覆盖已有修改。
+若未发现，先开新会话；仍没有时检查目录或重新启动 Agent。依赖是否齐备会单独检测，“Skill 已安装”不代表模型和 FFmpeg 已安装。
 
-如果当前会话尚未发现 Skill，开启新会话后输入：
+### 第三步：发原视频，开始使用
 
-> 用 xx3zdjj 处理这条口播，先分析气口、口误和重说，暂时不要剪。
+把视频拖入支持本机附件的 Agent，或把下面的示例路径换成你自己的绝对路径，再发送：
+
+```text
+使用 xx3zdjj 处理我的口播。
+原视频：这里填写原视频的绝对路径，或者使用我刚附上的原视频。
+逐字稿：有就粘贴在这里；没有请用本地模型转写。
+
+先检查环境并建立项目。分析整条视频的气口、口误和重说，给我拟删除的时间段、保留内容和预计时长，暂时不要直接剪。
+重复的字、词、半句或整句，只保留最后一次完整表达；拿不准的先给我原音试听。等我确认方案后再剪，不要吞字。
+```
+
+想显式选择技能时：Codex 输入 `$xx3zdjj`；Claude Code 输入 `/xx3zdjj`；Cursor 在 Agent 聊天里输入 `/` 选择 `xx3zdjj`。各产品目录、手动解压步骤和故障排查见 [完整新手教程](docs/GETTING_STARTED.md)。普通用户不需要填写内部 JSON，也不需要自己组织 FFmpeg 命令。
+
+---
 
 ## 第一次使用
 
