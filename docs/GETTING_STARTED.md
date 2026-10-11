@@ -1,6 +1,6 @@
 # 下载、安装和在 Agent 中使用 xx3zdjj
 
-**最省事的方法：打开你已经在用的本地 Agent，把 [首页安装提示词](../README.md#第一步让-agent-帮你安装推荐) 整段发给它。** 它负责下载、放入技能目录、核对文件和检查依赖。
+**最省事的方法：在本地 Agent 中打开准备用来剪辑的项目文件夹，把 [首页安装提示词](../README.md#第一步让-agent-帮你安装推荐) 整段发给它。** 它负责下载、放入当前项目的技能目录、核对文件和检查依赖；默认不全局安装。
 
 如果想手动安装，下面从零开始操作。下载 Skill 免费且不需要 GitHub 账号；所用 AI Agent、剪映或第三方依赖遵循各自的账号和许可规则。
 
@@ -10,7 +10,7 @@
 
 | 你使用的工具 | 安装后的调用方法 | 说明 |
 | --- | --- | --- |
-| 本地 Codex | `$xx3zdjj` 后接需求，或说“使用 xx3zdjj” | 可用 `$skill-installer` 从 GitHub 安装 |
+| 本地 Codex | `$xx3zdjj` 后接需求，或说“使用 xx3zdjj” | 可用 `$skill-installer` 从 GitHub 安装，须显式指定项目内目标 |
 | 本地 Claude Code | `/xx3zdjj` 后接需求 | 安装到个人或项目技能目录 |
 | 本地 Cursor Agent | 输入 `/` 搜索并选择 `xx3zdjj`，或明确要求使用 | 使用可以运行终端工具的 Agent 会话 |
 | 其他支持 Agent Skills 的本地 Agent | 按该产品的技能入口选择；或明确指名 | 先核对该产品的技能目录与执行能力，不猜安装路径 |
@@ -31,46 +31,62 @@
 
 ## 3. 把文件夹放到正确的位置
 
-以下是默认的个人技能目录，装一次可供本机多个项目使用。公司策略或宿主安装器指定了不同位置时，以它实际确认支持的位置为准；不要在多个目录重复安装同名 Skill。
+### 默认安装到当前项目
 
-| Agent | macOS 的完整 Skill 路径 | Windows 原生环境的完整 Skill 路径 |
+先在 Agent 中打开要剪辑的项目文件夹，让它报告项目根的绝对路径。项目根是你正在工作的文件夹，不是解压的 Skill 源码目录，也不一定是终端当前所在目录。没有打开项目或多根工作区中有多个候选时，先选定一个项目再安装。
+
+下表的 `<项目根>` 需要替换成刚确认的实际路径。**不要把项目路径换成 `~` 或 `%USERPROFILE%`**，那会变成用户级安装。
+
+| Agent | macOS 项目内完整 Skill 路径 | Windows 原生项目内完整 Skill 路径 |
 | --- | --- | --- |
-| Codex（按当前官方目录） | `~/.agents/skills/xx3zdjj/` | `%USERPROFILE%\.agents\skills\xx3zdjj\` |
-| Claude Code | `~/.claude/skills/xx3zdjj/` | `%USERPROFILE%\.claude\skills\xx3zdjj\` |
-| Cursor | `~/.cursor/skills/xx3zdjj/` | `%USERPROFILE%\.cursor\skills\xx3zdjj\` |
+| Codex | `<项目根>/.agents/skills/xx3zdjj/` | `<项目根>\.agents\skills\xx3zdjj\` |
+| Claude Code | `<项目根>/.claude/skills/xx3zdjj/` | `<项目根>\.claude\skills\xx3zdjj\` |
+| Cursor | `<项目根>/.cursor/skills/xx3zdjj/` | `<项目根>\.cursor\skills\xx3zdjj\` |
 
-`~` 代表当前运行 Agent 的用户主目录；Windows 文件资源管理器地址栏会展开 `%USERPROFILE%`。Codex 内置安装器或已有版本可能使用 `$CODEX_HOME/skills`（常见为 `~/.codex/skills`）；如果安装器已经确认在那里可用，保留该位置，不要为了这张表另装一份。目录依据：[Codex](https://learn.chatgpt.com/docs/build-skills)、[Claude Code](https://code.claude.com/docs/en/skills)、[Cursor](https://cursor.com/docs/skills)。
+这些项目目录由宿主在相应项目范围发现，子目录加载规则以宿主为准。不要笼统承诺“项目版一定优先”：Codex 同名副本可能同时出现，Claude Code 的个人同名技能可能优先于项目版。安装前检查当前项目和宿主会加载的其他位置，报告已有同名版本，保留它们；验收时核对**实际读取的是项目内哪一个 SKILL.md**。有冲突时先说明解决办法，不擅自删除或更名用户的旧技能。目录与同名规则依据：[Codex](https://learn.chatgpt.com/docs/build-skills)、[Claude Code](https://code.claude.com/docs/en/skills)、[Cursor](https://cursor.com/help/customization/skills)。
 
-**macOS：**在 Finder 中按 `Command + Shift + G`，输入表中路径的父目录，例如 `~/.agents/skills/`。不存在时可让 Agent 创建；将完整的 `xx3zdjj` 文件夹放入。隐藏文件夹不是错误，不必修改系统显示设置。
+**macOS：**在 Finder 中按 `Command + Shift + G`，输入项目内的 skills 父目录。例如项目是 `/Users/your_name/Movies/my_project`，Codex 的父目录就是 `/Users/your_name/Movies/my_project/.agents/skills`。不存在时可让 Agent 创建，再放入完整的 `xx3zdjj` 文件夹。
 
-**Windows：**在文件资源管理器地址栏输入父目录，例如 `%USERPROFILE%\.agents\skills`。不存在时新建对应文件夹，再复制完整的 `xx3zdjj` 文件夹。
+**Windows：**在文件资源管理器地址栏输入项目内 skills 父目录，例如 `D:\my_project\.agents\skills`；不存在时新建对应文件夹，再放入完整的 `xx3zdjj` 文件夹。示例路径需要换成自己的项目路径。
 
-**WSL、远程 SSH 或云端会话：**路径属于 Agent 真正执行命令的那台机器或环境，不一定是 Windows 桌面用户目录。请让 Agent 先报出执行环境与实际用户主目录。该 Skill 的自动补装主要针对 macOS 和 Windows x64，不把 WSL/Linux 或云端当成已经验收的本机环境，也不自动上传原片迁就云端。
+**WSL、远程 SSH 或云端会话：**路径属于 Agent 真正执行命令的环境，不一定是 Windows 桌面。先让 Agent 报告执行环境、项目根和目标目录。该 Skill 的自动补装主要针对 macOS 和 Windows x64，不把 WSL/Linux 或云端当成已经验收的本机环境，也不自动上传原片。
 
-正确结构：
+正确结构（以 Codex 为例，另外两种 Agent 将 `.agents` 换成表中对应目录）：
 
 ```text
-skills/
-└── xx3zdjj/
-    ├── SKILL.md
-    ├── scripts/
-    ├── references/
-    ├── assets/
-    ├── agents/
-    ├── docs/
-    └── README.md
+my_project/
+└── .agents/
+    └── skills/
+        └── xx3zdjj/
+            ├── SKILL.md
+            ├── scripts/
+            ├── references/
+            ├── assets/
+            ├── agents/
+            ├── docs/
+            └── README.md
 ```
 
-错误示例是 `skills/xx3zdjj/xx3zdjj/SKILL.md`，或目录里只有 `SKILL.md`、没有脚本和素材。如果目标已经存在，请保留旧版并比较修改，不要选择“全部替换”。
+错误示例是 `skills/xx3zdjj/xx3zdjj/SKILL.md`，或只有 `SKILL.md`、没有脚本和素材。如果目标已经存在，请保留旧版并比较修改，不要选择“全部替换”。
+
+### Codex 安装器的目标目录
+
+`$skill-installer` 的默认位置可能是用户级 `$CODEX_HOME/skills`，**只写“使用安装器”不能保证项目级安装**。让 Agent 检查当前安装器帮助，并为仓库根目录显式传入以下参数：
+
+```text
+--repo zhaidike123456ai-ux/xx3zdjj --path . --name xx3zdjj --dest "<项目根>/.agents/skills"
+```
+
+`--dest` 是项目内的 **skills 父目录**，安装器再创建 `xx3zdjj`，不要把目标写成 `.../skills/xx3zdjj` 后再嵌套一层。上述是给安装器的参数示意，不是完整的终端命令；真实脚本位置和 Python 命令由 Agent 检查后填写。不支持指定项目目标的安装器应改用完整 ZIP 的项目内复制方式，不改为全局安装。
 
 ### 有 Git 时的可选安装方法
 
-不想手动解压，可以让 Agent 执行 Git 克隆。下面以当前 Codex 目录为例，其他产品按上表更改目标目录。
+也可以让 Agent 用 Git 克隆。下面以 Codex 为例：先在终端进入已选定的项目根，核对输出路径；其他 Agent 将 `.agents` 换成对应目录。没有 Git 时直接用 ZIP，无需先安装 Git。
 
-macOS 终端：
+macOS 终端（先执行 `pwd`，确认显示的就是项目根）：
 
 ```bash
-skill_target="$HOME/.agents/skills/xx3zdjj"
+skill_target="$PWD/.agents/skills/xx3zdjj"
 if [ -e "$skill_target" ] || [ -L "$skill_target" ]; then
   echo "目标已存在，请先保留旧版并检查差异：$skill_target"
 else
@@ -79,10 +95,10 @@ else
 fi
 ```
 
-Windows PowerShell：
+Windows PowerShell（先执行 `Get-Location`，确认显示的就是项目根）：
 
 ```powershell
-$skillRoot = Join-Path $HOME '.agents/skills'
+$skillRoot = Join-Path (Get-Location).Path '.agents/skills'
 $skillTarget = Join-Path $skillRoot 'xx3zdjj'
 if (Test-Path -LiteralPath $skillTarget) { throw "目标已存在，请先保留旧版并检查差异：$skillTarget" }
 New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
@@ -90,19 +106,50 @@ git clone https://github.com/zhaidike123456ai-ux/xx3zdjj.git "$skillTarget"
 if ($LASTEXITCODE -ne 0) { throw 'Git clone 失败，请检查网络与上方错误。' }
 ```
 
-不要为了运行这些示例覆盖系统环境变量。没有 Git 时直接使用 ZIP，不必先安装 Git。
+这些命令只检查目标目录是否已存在；其他位置的同名技能仍需按上文核对。Git 克隆会保留 Skill 自己的 `.git` 历史。若需要把完整 Skill 文件纳入你现有项目的 Git，建议用 ZIP 复制版，避免嵌套仓库；安装提示词不授权自动提交或推送你的项目。
+
+### 可选全局安装
+
+只有想让多个项目共用时，才采用下面的用户级目录。“全局”在这里指当前用户多个项目可用，不是写系统目录或申请管理员权限。
+
+| Agent | macOS 用户级完整 Skill 路径 | Windows 原生用户级完整 Skill 路径 |
+| --- | --- | --- |
+| Codex（按当前官方目录） | `~/.agents/skills/xx3zdjj/` | `%USERPROFILE%\.agents\skills\xx3zdjj\` |
+| Claude Code | `~/.claude/skills/xx3zdjj/` | `%USERPROFILE%\.claude\skills\xx3zdjj\` |
+| Cursor | `~/.cursor/skills/xx3zdjj/` | `%USERPROFILE%\.cursor\skills\xx3zdjj\` |
+
+`~` 是执行 Agent 的用户主目录，Windows 文件资源管理器可展开 `%USERPROFILE%`。Codex 内置安装器或已有版本可能采用 `$CODEX_HOME/skills`（通常为 `~/.codex/skills`）；以宿主核实可用的位置为准，不在多个目录重复安装。
+
+想选择此方式，单独发送以下提示词，**不要与首页的“仅当前项目”提示词一起发送**：
+
+```text
+请从 https://github.com/zhaidike123456ai-ux/xx3zdjj 安装完整 xx3zdjj Skill。
+这次我明确选择用户级安装，希望本机多个项目都能使用。先确认当前 Agent 支持的用户级目录，再安装；不写系统级目录。
+已有同名版本先报告路径、版本和差异，保留修改，不直接覆盖。安装后核对资源、实际加载路径和调用方法。
+本次只安装 Skill 并只读检测依赖，不补装工具或模型；缺失项列出来源、位置和空间，等我确认。不要剪视频、上传视频或自动付费。
+```
+
+### Skill、依赖与作品的位置分别管理
+
+项目级安装只决定 **Skill 文件放在哪、在什么项目中发现**，不会自动更改运行环境和作品的位置：
+
+- Python、FFmpeg、模型等默认在本机用户级隔离目录中检测、按授权补齐和复用；不会因每个项目安装 Skill 就复制整套环境，也不会写全局 pip/npm。首次安装提示词只允许检测，不授权补装。
+- 工作室默认仍是 `Documents/talking_head_studio`。如希望作品也留在当前项目，可告诉 Agent：“本项目使用 `<项目根>/talking_head_studio` 作为工作室”，由它按 `studio_manager.py --studio-root` 设置。
+- 若明确要求运行环境也留在项目内，让 Agent 先核对并说明 `--runtime-root` 的位置和空间，再按授权执行。这不等于已经验证所有工具缓存都只写项目内，不能把项目级 Skill 当成完全隔离的便携环境。
+
+见 [运行环境说明](../references/runtime.md) 和 [项目目录说明](../references/studio.md)。
 
 ## 4. 让 Agent 确认能用
 
-安装后发送：
+默认项目级安装后，发送下面的验证提示词。如果刚选择的是可选用户级安装，将“项目内这一份”换成“刚确认的用户级目录内这一份”，核对实际路径，不为验证再向项目复制一份。
 
 ```text
-请检查你能否发现名为 xx3zdjj 的 Skill，读取它的 SKILL.md。
-告诉我真实安装路径，确认 scripts、references、assets 都齐全。
+请在当前项目会话中检查能否发现 xx3zdjj，读取项目内这一份的 SKILL.md。
+告诉我实际加载路径和版本，确认 scripts、references、assets 都齐全，并说明有无其他同名副本。
 本次只做环境检测，列出哪些能用、哪些缺失，不开始处理视频。
 ```
 
-如果没有识别，开新会话后重试；仍没有时重启 Agent，再检查目录、技能启用状态及公司策略。安装器本身可能支持立即发现，能找到时无需反复重启。
+如果没有识别，在同一项目开新会话后重试；仍没有时重启 Agent，再检查目录、技能启用状态及公司策略。安装器本身可能支持立即发现，能找到时无需反复重启。
 
 如果某个 Agent 没有 Skill 自动发现功能，但能访问本地文件和运行命令，可以发送下面这段临时加载提示词：
 
@@ -145,7 +192,7 @@ $xx3zdjj
 
 Windows 原片可以写成 `C:\Users\your_name\Videos\take01.mp4`。输入中文文件名和带空格的完整路径可以保留，交给 Agent 正确引用。附件也必须能被当前本地 Agent 读取；不要把别人的示例路径原样复制使用。
 
-Claude Code 可把第一行换成 `/xx3zdjj`；Cursor 可在 Agent 聊天中输入 `/` 后选中 `xx3zdjj`。通用写法是“使用 xx3zdjj 处理我刚发的原视频”。调用语法来源：[Codex](https://learn.chatgpt.com/docs/build-skills)、[Claude Code](https://code.claude.com/docs/en/skills)、[Cursor](https://cursor.com/docs/skills)。
+Claude Code 可把第一行换成 `/xx3zdjj`；Cursor 可在 Agent 聊天中输入 `/` 后选中 `xx3zdjj`。通用写法是“使用 xx3zdjj 处理我刚发的原视频”。项目级安装时，请在安装了 Skill 的项目会话中调用；用户级安装可在宿主支持的其他本地项目中调用。有同名副本时先核对实际加载路径。调用语法来源：[Codex](https://learn.chatgpt.com/docs/build-skills)、[Claude Code](https://code.claude.com/docs/en/skills)、[Cursor](https://cursor.com/docs/skills)。
 
 你会先看到环境报告和剪辑计划。确认后给完整无字幕预览；粗剪确认后做字幕；字幕确认后选择人物形状与画布背景；完整 MP4 确认后再做剪映工程。每次修改都给完整新版预览。你无需自己填写工程 JSON 或编写媒体命令。
 
@@ -157,7 +204,9 @@ Claude Code 可把第一行换成 `/xx3zdjj`；Cursor 可在 Agent 聊天中输�
 | --- | --- |
 | 下载链接打不开 | 打开 [Release 页面](https://github.com/zhaidike123456ai-ux/xx3zdjj/releases/latest) 的 Assets；仍打不开先解决 GitHub 网络访问 |
 | 提示没有 Git | 用 ZIP 手动安装，或把已下载 ZIP 的本地路径发给 Agent |
-| Agent 找不到 Skill | 核对宿主、执行机器、目录层级和 SKILL.md；开新会话或重启；已有同名版本先消除歧义 |
+| Agent 找不到 Skill | 核对宿主、项目根、执行机器、目录层级和 SKILL.md；在同一项目开新会话；已有同名版本先核对实际加载路径 |
+| 在另一个项目找不到 | 项目级安装不新增全局技能；在需要的项目分别安装，或明确选择可选用户级安装 |
+| 读到了旧的全局版本 | 报告全部同名路径，按宿主规则解决并核对项目内实际文件；不擅自删除全局版 |
 | Agent 只解释步骤、不执行 | 确认会话有本地文件和终端工具，并允许它访问本次项目；如果没有执行能力，换合适的本地 Agent |
 | Skill 找到了，但转写/导出失败 | 让 Agent 跑环境检查和小测试；不要把“安装成功”当成所有运行环境都准备好了 |
 | Windows 禁止执行 ps1 | 不关闭系统保护；让 Agent 在现有允许的环境用兼容 Python 运行检查，或按本机管理策略解决 |
