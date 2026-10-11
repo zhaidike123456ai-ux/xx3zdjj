@@ -1,0 +1,110 @@
+import json
+import tempfile
+import unittest
+import subprocess
+import sys
+from pathlib import Path
+
+from stage_gate import CHECKS, file_hash, validate_report
+
+
+class StageGateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "media.bin"
+        self.source.write_bytes(b"synthetic gate test; not a media quality test")
+        (self.root / "evidence.txt").write_text("test fixture", encoding="utf-8")
+        self.report = self.root / "gate.json"
+        self.data = {
+            "stage": "rough-cut",
+            "artifacts": {"source": {"sha256": file_hash(self.source)}},
+            "checks": {key: {"status": "passed", "method": "synthetic test",
+                              "evidence": ["evidence.txt"]}
+                       for key in CHECKS["rough-cut"]},
+            "blocking_counts": {"approved_not_executed": 0, "known_unfixed": 0,
+                                "unresolved": 0},
+            "user_approval": {"status": "approved", "message": "fixture approval",
+                              "recorded_at": "fixture time", "evidence": "evidence.txt"},
+        }
+
+    def check(self):
+        self.report.write_text(json.dumps(self.data), encoding="utf-8")
+        return validate_report(self.report, "rough-cut", {"source": self.source})
+
+    def test_valid_record(self):
+        self.assertEqual(self.check(), [])
+
+    def test_changed_media(self):
+        self.source.write_bytes(b"changed version")
+        self.assertTrue(self.check())
+
+    def test_missing_checks(self):
+        del self.data["checks"]["G5"]
+        self.assertTrue(self.check())
+
+    def test_failure_and_unverified(self):
+        for status in ("failed", "unverified", "pending"):
+            self.data["checks"]["G4"]["status"] = status
+            self.assertTrue(self.check())
+
+    def test_unresolved_or_false_counts(self):
+        for value in (1, False, "0", None):
+            self.data["blocking_counts"]["unresolved"] = value
+            self.assertTrue(self.check())
+
+    def test_no_user_approval(self):
+        self.data["user_approval"]["status"] = "pending"
+        self.assertTrue(self.check())
+
+    def test_missing_evidence(self):
+        (self.root / "evidence.txt").unlink()
+        self.assertTrue(self.check())
+
+    def test_wrong_stage(self):
+        self.data["stage"] = "captions"
+        self.assertTrue(self.check())
+
+    def test_ass_version_binding(self):
+        self.check()
+        ass = self.root / "captions.ass"
+        ass.write_text("test", encoding="utf-8")
+        self.assertTrue(validate_report(self.report, "rough-cut",
+                                        {"source": self.source, "ass": ass}))
+
+    def test_malformed_report(self):
+        self.report.write_text("[]", encoding="utf-8")
+        self.assertTrue(validate_report(self.report, "rough-cut", {"source": self.source}))
+
+    def test_caption_entry_blocks_before_media_processing(self):
+        self.data["checks"]["G5"]["status"] = "failed"
+        self.check()
+        output = self.root / "not-created"
+        result = subprocess.run([
+            sys.executable, str(Path(__file__).with_name("run_pipeline.py")),
+            "captions", "--source", str(self.source), "--script", str(self.source),
+            "--output-dir", str(output), "--font-name", "fixture",
+            "--font-file", str(self.source), "--approval-report", str(self.report),
+        ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)["status"], "blocked")
+        self.assertFalse(output.exists())
+
+    def test_preview_entry_blocks_without_caption_approval(self):
+        self.check()
+        output = self.root / "not-created.mp4"
+        result = subprocess.run([
+            sys.executable, str(Path(__file__).with_name("run_pipeline.py")),
+            "preview", "--source", str(self.source), "--background", str(self.source),
+            "--ass", str(self.source), "--font-file", str(self.source),
+            "--output", str(output), "--mask-shape", "circle", "--subject-crop-y", "0",
+            "--approval-report", str(self.report),
+        ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)["status"], "blocked")
+        self.assertFalse(output.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

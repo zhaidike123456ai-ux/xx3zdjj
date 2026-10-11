@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-10-12",
+  "python": {
+    "version": "3.11.13",
+    "supported_existing": ">=3.9,<3.14",
+    "source": "https://docs.astral.sh/uv/guides/install-python/",
+    "estimated_mb": 120
+  },
+  "uv": {
+    "version": "0.8.22",
+    "source": "https://github.com/astral-sh/uv/releases/tag/0.8.22",
+    "base_url": "https://github.com/astral-sh/uv/releases/download/0.8.22/",
+    "archives": {
+      "Darwin-arm64": {
+        "name": "uv-aarch64-apple-darwin.tar.gz",
+        "sha256": "3f61099e261e449527141dbf125629fab33ad696468c8c90cebbac40185a306c"
+      },
+      "Darwin-x64": {
+        "name": "uv-x86_64-apple-darwin.tar.gz",
+        "sha256": "76638fdcfa91357858771551a1c88de1f7c3b270b33ab1866f8a0618d9e442d8"
+      },
+      "Windows-x64": {
+        "name": "uv-x86_64-pc-windows-msvc.zip",
+        "sha256": "5049375aa2a5162f132b2c1cb992e25d42d47d934cab8c174dbe6f60973dcc12"
+      },
+      "Windows-arm64": {
+        "name": "uv-aarch64-pc-windows-msvc.zip",
+        "sha256": "dbb3a5bd06d20c9ab8bb9a79c7c4fb5832ca1c7ba5f231a020bc92e5a3c6dcf4"
+      }
+    }
+  },
+  "ffmpeg": {
+    "version": "8.1.2",
+    "source": "https://ffmpeg.org/download.html",
+    "binary_source": "https://conda-forge.org/",
+    "note_zh": "FFmpeg官网仅提供源码；缺失时使用conda-forge原生架构二进制，隔离前缀，不改系统Homebrew或其他项目。包管理器校验包哈希。",
+    "estimated_mb": 800
+  },
+  "micromamba": {
+    "version": "2.9.0-0",
+    "base_url": "https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/",
+    "source": "https://github.com/mamba-org/micromamba-releases",
+    "platform_names": {
+      "Darwin-arm64": "osx-arm64",
+      "Darwin-x64": "osx-64",
+      "Windows-x64": "win-64"
+    },
+    "sha256": {
+      "Darwin-arm64": "ec2a072f028e1a7cf20f3e2e74d5a8127cf5a5f27636375b5359811565f4e5be",
+      "Darwin-x64": "1e71054bb3ac9a076e21f7ec48acfef536f9b3f1408f371a942784bf5ef83d8a",
+      "Windows-x64": "a6d804394b2418991c4e29562853eaace2f2ce9d9da661a98e74e02e8dbb44b0"
+    }
+  },
+  "faster_whisper": {
+    "version": "1.2.1",
+    "source": "https://github.com/SYSTRAN/faster-whisper",
+    "registry": "https://pypi.org/pypi",
+    "estimated_mb": 500
+  },
+  "model": {
+    "repo": "Systran/faster-whisper-medium",
+    "source": "https://huggingface.co/Systran/faster-whisper-medium",
+    "required": [
+      "model.bin",
+      "config.json",
+      "tokenizer.json"
+    ],
+    "estimated_mb": 1700,
+    "vocabulary_alternatives": [
+      "vocabulary.json",
+      "vocabulary.txt"
+    ]
+  },
+  "node": {
+    "version": "22.23.3",
+    "minimum_major": 22,
+    "source": "https://nodejs.org/",
+    "base_url": "https://nodejs.org/dist/v22.23.3/",
+    "estimated_mb": 120
+  },
+  "remotion": {
+    "version": "4.0.534",
+    "source": "https://www.remotion.dev/docs/",
+    "packages": [
+      "remotion",
+      "@remotion/cli",
+      "@remotion/renderer"
+    ],
+    "estimated_mb": 300,
+    "macos_min_for_render": "15.0"
+  },
+  "hyperframes": {
+    "version": "0.8.149",
+    "source": "https://github.com/heygen-com/hyperframes",
+    "package": "hyperframes",
+    "estimated_mb": 300
+  },
+  "policy": {
+    "install_requires_allow_install": true,
+    "global_pip": false,
+    "global_npm": false,
+    "remote_shell_scripts": false,
+    "uploads": false,
+    "automatic_payment": false,
+    "browser_download_automatic": false
+  }
+}

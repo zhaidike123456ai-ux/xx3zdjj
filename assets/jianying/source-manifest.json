@@ -1,0 +1,22 @@
+{
+  "upstream": "GuanYixuan/pyJianYingDraft",
+  "license": "Apache-2.0",
+  "ref": "main; commit not pinned, downloaded bytes individually hashed",
+  "templates": [
+    {
+      "file": "draft_content_template.json",
+      "url": "https://raw.githubusercontent.com/GuanYixuan/pyJianYingDraft/main/pyJianYingDraft/assets/draft_content_template.json",
+      "sha256": "f3b9036da3a0bce68145657bb3fa9b0147e0fe39f7082e43590fb91b63f99d94"
+    },
+    {
+      "file": "draft_meta_info.json",
+      "url": "https://raw.githubusercontent.com/GuanYixuan/pyJianYingDraft/main/pyJianYingDraft/assets/draft_meta_info.json",
+      "sha256": "8bbc602f00a61a31ee16059a7a4525aa5d97a06cde509930a159f0f5ed1a77f6"
+    }
+  ],
+  "adaptation": "Fresh IDs and project-local Resources. Mac filename from open PR198; common_mask circle based on one Mac11 native pilot, not universal compatibility.",
+  "references": [
+    "https://github.com/GuanYixuan/pyJianYingDraft/pull/198",
+    "https://github.com/GuanYixuan/pyJianYingDraft/pull/201"
+  ]
+}
