@@ -8,46 +8,25 @@
 
 **[直接下载 Skill 压缩包](https://github.com/zhaidike123456ai-ux/xx3zdjj/releases/latest/download/xx3zdjj-skill.zip)** · **[完整安装与 Agent 使用教程](docs/GETTING_STARTED.md)** · **[查看发布版本](https://github.com/zhaidike123456ai-ux/xx3zdjj/releases/latest)**
 
-这是给 **能读取本机文件、执行本机命令的 AI Agent** 使用的 Skill，例如本地 Codex、Claude Code、Cursor Agent。普通网页聊天里上传 ZIP，不等于安装到本机。先准备好你自己的 Agent；剪映工程验收还需要在同一台电脑上安装剪映。
+适用于能读取本机文件、运行命令的本地 Agent，例如 Codex、Claude Code、Cursor Agent。
 
 ### 第一步：让 Agent 帮你安装（推荐）
 
-先在 Agent 中打开准备剪视频的项目文件夹，再把下面整段复制到聊天框。**默认安装到当前项目，不做全局安装**：
+先在 Agent 中打开你的项目文件夹，再复制下面这段：
 
 ```text
-请把 xx3zdjj Skill 安装到我当前打开的项目中：
+请帮我安装这个口播精剪 Skill：
 https://github.com/zhaidike123456ai-ux/xx3zdjj
 
-先识别当前 Agent、操作系统和当前项目根目录，说明项目根的绝对路径。若未打开项目或有多个候选目录，先让我指定，不把下载目录当项目。
-采用该 Agent 实际支持的项目级技能目录：Codex 通常为 <项目根>/.agents/skills/xx3zdjj，Claude Code 为 <项目根>/.claude/skills/xx3zdjj，Cursor 为 <项目根>/.cursor/skills/xx3zdjj。其他 Agent 请先核对官方支持的位置；不支持项目级时先说明，不改成全局安装。
-仓库根目录就是 Skill 根目录。下载完整内容，包括 SKILL.md、scripts、references、assets 等，放入名为 xx3zdjj 的文件夹，不多套一层目录。
-不要写入用户级或系统级技能目录。若使用安装器，必须显式指定项目内的目标目录，不能使用它的全局默认位置。
-检查项目内及会被当前 Agent 加载的其他位置是否已有同名 Skill；有则先说明路径、版本和差异，保留我的修改，不覆盖或删除已有版本。
-安装后检查资源完整，并在当前项目会话中验证能发现和读取项目内这一份 xx3zdjj，告诉我实际加载路径、版本和调用方法；若有同名冲突或需要开启新会话，请说明。
-本次只安装 Skill 并只读检测依赖，不补装工具或模型。已有可用环境直接复用；缺失项列出来源、安装位置和预计空间，等我确认再补装。不要上传我的视频、自动付费或开始剪辑。
+请按仓库安装教程，把完整 Skill 安装到当前项目，不要全局安装。已有同名版本先告诉我，不覆盖修改。
+装好后确认能调用，并告诉我怎么使用。先只检测依赖，缺失项说明来源、位置和空间后等我确认；暂时不要剪视频。
 ```
 
-项目级 Skill 用于该项目及宿主支持的子目录范围；换到其他项目时不会因此新增全局 Skill。想供本机多个项目共用，可主动选择教程中的 [可选全局安装](docs/GETTING_STARTED.md#可选全局安装)。
-
-Codex 可让 `$skill-installer` 执行，但必须指定项目目录。安装器支持时使用 `--repo zhaidike123456ai-ux/xx3zdjj --path . --name xx3zdjj --dest "<项目根>/.agents/skills"`，其中 `--dest` 是 **skills 父目录**，末尾不再加 `xx3zdjj`；让 Agent 根据当前安装器的帮助信息执行。Codex 的项目目录依据：[官方说明](https://learn.chatgpt.com/docs/build-skills)。
+目录和安装参数交给 Agent 按 [安装教程](docs/GETTING_STARTED.md) 处理。想让多个项目共用，也可以选择 [全局安装](docs/GETTING_STARTED.md#可选全局安装)。
 
 ### 第二步：确认安装成功
 
-让 Agent 回答：“你是否能在当前项目中找到 xx3zdjj？请读取项目内这一份的 SKILL.md，给出真实加载路径和版本，并说明有无其他同名副本。”
-
-安装后的文件夹应是下图结构，**不能只下载 SKILL.md，也不要多套一层 xx3zdjj 文件夹**：
-
-```text
-当前项目的技能目录/
-└── xx3zdjj/
-    ├── SKILL.md
-    ├── scripts/
-    ├── references/
-    ├── assets/
-    └── agents/
-```
-
-若未发现，先在同一项目开新会话；仍没有时检查目录或重新启动 Agent。项目级安装限定 Skill 的位置，依赖与成片目录单独管理：工具和模型默认按授权放在本机用户级隔离目录，作品默认放在 Documents/talking_head_studio。“Skill 已安装”不代表模型和 FFmpeg 已安装。详见 [安装范围说明](docs/GETTING_STARTED.md#skill依赖与作品的位置分别管理)。
+Agent 应告诉你实际加载路径、版本和调用方法，确认加载的是当前项目内的 Skill。若未找到，先在同一项目开新会话；仍有问题，让 Agent 按 [教程排查](docs/GETTING_STARTED.md#7-常见问题)。
 
 ### 第三步：发原视频，开始使用
 
