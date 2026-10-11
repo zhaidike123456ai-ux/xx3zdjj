@@ -1,6 +1,6 @@
 interface:
   display_name: "xx3zdjj"
   short_description: "引导式本地口播精剪，自动检查环境，管理偏好资产并分步交付字幕、蒙版和剪映工程"
-  default_prompt: "使用 $xx3zdjj 处理我提供的口播视频，先检查环境并说明项目目录，再分析气口、重复和口误；有可独立任务且工具可用时主动创建子智能体分工与独立质检，按确认阶段制作完整预览与可编辑剪映工程。"
+  default_prompt: "使用 $xx3zdjj 处理我的口播，自主判断子智能体人数与分工，安排独立质检并按确认阶段交付；剪映工程基础检查后即交文件，深度验收先问我是否需要。"
 policy:
   allow_implicit_invocation: true
