@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from review_state import validate_review
 
 
 CHECKS = {
@@ -32,6 +33,25 @@ def validate_report(report_path, expected_stage, inputs):
             errors.append("native gate requires project, manifest and native_export version inputs")
         if report.get("stage") != expected_stage:
             errors.append("wrong preceding stage")
+        if expected_stage == "rough-cut":
+            residual = report.get("residual_review", {})
+            reference = residual.get("report", {}) if isinstance(residual, dict) else {}
+            if not isinstance(reference, dict) or not isinstance(reference.get("path"), str) or not reference.get("path") or not isinstance(reference.get("sha256"), str):
+                errors.append("rough-cut requires a hashed residual-review report for the current media; legacy zero counts cannot pass")
+            elif "source" not in inputs:
+                errors.append("residual review requires current rough-cut source input")
+            else:
+                resolution = residual.get("resolutions")
+                resolution_path = None
+                resolution_hash = None
+                if resolution is not None:
+                    if not isinstance(resolution, dict) or not isinstance(resolution.get("path"), str) or not resolution.get("path") or not isinstance(resolution.get("sha256"), str):
+                        errors.append("residual resolutions require path and SHA256")
+                    else:
+                        resolution_path = report_path.parent / resolution["path"]
+                        resolution_hash = resolution["sha256"]
+                errors.extend(validate_review(report_path.parent / reference["path"], inputs["source"],
+                                              resolution_path, reference.get("sha256"), resolution_hash))
         if expected_stage == "jianying-project":
             if report.get("project_kind") != "full":
                 errors.append("native acceptance requires a full project, not a pilot")
@@ -106,7 +126,8 @@ def main():
     if args.ass:
         inputs["ass"] = args.ass
     errors = validate_report(args.report, args.stage, inputs)
-    print(json.dumps({"status": "blocked" if errors else "passed", "errors": errors}))
+    print(json.dumps({"status": "blocked" if errors else "passed", "command_status": "completed",
+                      "quality_status": "blocked" if errors else "passed", "errors": errors}))
     return 2 if errors else 0
 
 

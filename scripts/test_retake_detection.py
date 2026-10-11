@@ -76,6 +76,13 @@ def test_normal_shared_suffix_not_repeat():
     assert lexical and "no inferred intra-token cut" in lexical[0]["status"]
 
 
+def load_tests(loader, tests, pattern):
+    """Include historical function regressions in unittest discovery."""
+    import unittest
+    return unittest.TestSuite(unittest.FunctionTestCase(value) for name,value in sorted(globals().items())
+                              if name.startswith('test_') and callable(value))
+
+
 if __name__ == "__main__":
     test_explicit_half_sentence_restart()
     test_swallowed_restart_long_token_is_reviewed()

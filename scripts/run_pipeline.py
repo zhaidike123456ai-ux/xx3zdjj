@@ -18,6 +18,8 @@ from pathlib import Path
 from fractions import Fraction
 from stage_gate import validate_report
 from connect_captions import connect
+from opening_review import analyze_opening, execute_opening_review
+from review_state import make_report, full_coverage, stable_alert_id
 
 
 def run(cmd: list[str], *, capture: bool = True) -> subprocess.CompletedProcess:
@@ -254,7 +256,6 @@ def frame_safe_retake_cut_start(previous_word_end: float, failed_audio_onset: fl
 
 
 def detect_retake_groups(segments: list[dict], policy: str) -> list[dict]:
-    if policy == "none": return []
     candidates=[]
     for size in (3,2,1):
         for i in range(len(segments)-size):
@@ -275,53 +276,32 @@ def detect_retake_groups(segments: list[dict], policy: str) -> list[dict]:
         selected.append(x)
     rows=[]
     for i,x in enumerate(sorted(selected,key=lambda x:x["first_start"]),1):
-        high=x["similarity"]>=0.82 and x["size"]>=2
+        high=policy == "last_complete" and x["similarity"]>=0.82 and x["size"]>=2
         rows.append({"id":f"RT{i:03d}","first_attempt_start":f"{x['first_start']:.3f}","first_attempt_end":f"{x['first_end']:.3f}","first_attempt_text":x["first_text"],"last_attempt_start":f"{x['last_start']:.3f}","last_attempt_end":f"{x['last_end']:.3f}","last_attempt_text":x["last_text"],"similarity":f"{x['similarity']:.3f}","gap_seconds":f"{x['gap']:.3f}","policy":policy,"decision":"proposed_delete_first_attempt_keep_last_pending_confirmation" if high else "review_range_unclear","proposed_delete_start":f"{x['first_start']:.3f}" if high else "","proposed_delete_end":f"{max(x['first_start'],x['last_start']-0.12):.3f}" if high else "","kept_range":f"{x['last_start']:.3f}-{x['last_end']:.3f}","status":"machine candidate; last attempt completeness requires listening"})
     return rows
 
 
 def detect_opening_swallowed_restarts(check_segments: list[dict] | None, silences: list[dict],
                                       fine_silences: list[dict], policy: str, fps: float) -> list[dict]:
-    """Find opening retries hidden inside an abnormally long ASR token.
+    """Legacy anomaly detector: flag long short tokens, never infer a cut.
 
-    Contextual ASR sometimes folds several failed opening attempts into one or
-    two characters with a multi-second token duration.  A later clean take then
-    begins after a real silence, while ordinary phrase matching sees only one
-    segment.  Return a reviewable, source-relative range; execution still
-    requires the user's last-complete authorization.
+    Independent acoustic windows now cover short restarts this heuristic misses.
+    The deletion policy must not disable detection.
     """
-    if policy != "last_complete" or not check_segments: return []
+    if not check_segments: return []
     words=flatten_words({"segments":check_segments})
+    if not words: return []
+    first=float(words[0]["start"])
     rows=[]
-    for i,w in enumerate(words):
+    for w in words:
         start=float(w["start"]); end=float(w["end"]); token=clean_token(w["word"])
-        if start>25 or not token or len(token)>2 or end-start<0.90: continue
-        following=next((x for x in words[i+1:] if float(x["start"])-end>=1.0),None)
-        if not following: continue
-        next_start=float(following["start"])
-        # Use a short-duration, higher-threshold silence pass to separate an
-        # isolated first word from the later complete take.  Whole-file ASR may
-        # stretch one token across both sounds and the quiet gap between them.
-        prior_silences=[s for s in fine_silences if end<=float(s["end"])<=next_start]
-        if not prior_silences:
-            prior_silences=[s for s in silences if end<=float(s["end"])<=next_start]
-        if not prior_silences: continue
-        separator=max(prior_silences,key=lambda s:float(s["end"]))
-        silence_start=float(separator["start"]); onset=float(separator["end"])
-        # Cut on a video frame inside the measured separating silence.  The
-        # midpoint removes the failed word while leaving real quiet audio on
-        # both sides, avoiding a fixed millisecond shift into the final word.
-        delete_end=max(0.0,int(((silence_start+onset)/2)*fps)/fps)
-        rows.append({
-            "id":f"OR{len(rows)+1:03d}","failed_attempt_start":f"{start:.3f}",
+        if start>first+6 or not token or len(token)>2 or end-start<.90: continue
+        rows.append({"id":f"OR{len(rows)+1:03d}","failed_attempt_start":f"{start:.3f}",
             "anomalous_token_end":f"{end:.3f}","anomalous_token":token,
-            "last_attempt_audio_onset":f"{onset:.3f}","next_reliable_word_start":f"{next_start:.3f}",
-            "decision":"proposed_delete_opening_attempts_keep_last_pending_confirmation",
-            "proposed_delete_start":"0.000","proposed_delete_end":f"{delete_end:.3f}",
-            "evidence":f"short opening token spans {end-start:.3f}s and a later take begins after silence",
-            "status":f"focused opening review required; cut is frame-aligned inside measured silence {silence_start:.3f}-{onset:.3f}s",
-        })
-        break
+            "last_attempt_audio_onset":"","next_reliable_word_start":"",
+            "decision":"local_audio_review_required","proposed_delete_start":"","proposed_delete_end":"",
+            "evidence":f"short opening token spans {end-start:.3f}s; overlapping acoustic review required",
+            "status":"review_required; duration is a warning, not proof of a restart or safe cut"})
     return rows
 
 
@@ -352,6 +332,148 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
         w=csv.DictWriter(f,fieldnames=fieldnames); w.writeheader(); w.writerows(rows)
 
 
+class OpeningDecoder:
+    """One local model/cache per stage; callback timestamps remain window-local."""
+    def __init__(self, source, out, args):
+        self.source, self.out, self.args = source, out, args
+        self.model = None
+        self.key = None
+        out.mkdir(parents=True, exist_ok=True)
+
+    def __call__(self, window):
+        a, b = float(window['start']), float(window['end'])
+        if self.key is None:
+            self.key = recognition_key(self.source, self.args)
+        key = self.key | {'window': [a, b], 'coordinate_system': 'window_local_seconds', 'schema': 2}
+        name = 'window-' + hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:20]
+        target, audio = self.out / (name + '.json'), self.out / (name + '.wav')
+        if target.exists():
+            data = json.loads(target.read_text(encoding='utf-8'))
+            if data.get('cache_key') != key:
+                raise ValueError('window cache mismatch')
+            return data
+        run(['ffmpeg','-v','error','-y','-ss',str(a),'-i',str(self.source),'-t',str(b-a),
+             '-vn','-ar','16000','-ac','1',str(audio)], capture=False)
+        if self.model is None:
+            from faster_whisper import WhisperModel
+            self.model = WhisperModel(self.args.model, device='cpu', compute_type='int8',
+                                      local_files_only=True, cpu_threads=self.args.cpu_threads)
+        data = transcribe(self.model, audio, False, False, None)
+        data.update(cache_key=key, source_sha256=key['source_sha256'], coordinate_system='window_local_seconds')
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        return data
+
+
+def candidate_alerts(candidates, duration, origin):
+    alerts = []
+    for x in candidates:
+        a = float(x.get('start', x.get('first_start', 0)))
+        b = float(x.get('end', x.get('repeat_end', a)))
+        # ASR may put a restart boundary at the first onset. Preserve its warning
+        # with a review context, not a zero-width pseudo-cut.
+        a = max(0, min(a, duration))
+        b = min(duration, max(b, a + .08))
+        if b <= a: continue
+        alerts.append({'check_id':'repeated_speech', 'start':a, 'end':b,
+                       'kind':origin, 'text':x.get('content', x.get('phrase','')),
+                       'evidence':x, 'review_required':True})
+    return alerts
+
+
+def opening_audit(source, audio, out, args, words, decoder=None):
+    """Mandatory detection independent of deletion policy or whole-file pass count."""
+    try:
+        plan = analyze_opening(audio, words)
+        result = execute_opening_review(plan, decoder or OpeningDecoder(source, out/'opening-windows', args))
+    except (OSError, ValueError, RuntimeError, ImportError) as error:
+        plan = {'status':'unavailable','windows':[],'reason':str(error)}
+        result = {'status':'unavailable','windows':[],'coverage':{},'reason':str(error)}
+    duration = float(plan.get('acoustic_evidence',{}).get('duration',0))
+    alerts = []
+    for window in result['windows']:
+        local = window.get('words',[])
+        items = fragment_restart_candidates(local) + repeated_phrases(local)
+        alerts.extend(candidate_alerts(items, duration, 'opening_overlap'))
+    activity = plan.get('opening_activity',[])
+    # Two close acoustic bursts can hide a short attempted word even when every
+    # decode returns a single word. This is uncertainty, never evidence to cut.
+    if len(activity) >= 2:
+        first, second = activity[:2]
+        if first['end']-first['start'] <= .65 and 0 <= second['start']-first['end'] <= 1:
+            alerts.append({'check_id':'repeated_speech','start':first['start'],'end':second['end'],
+                'kind':'opening_short_activity','text':'', 'review_required':True,
+                'evidence':{'activities':[first,second],'reason':'short initial activity before another onset; could be a syllable, breath, or attempted word; listen and compare overlapping windows; never auto-delete'}})
+    result.update(plan=plan, alerts=alerts)
+    (out/'opening-review.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    return result
+
+
+def review_checks(duration, alerts, opening, full=True):
+    coverage = full_coverage(duration) if full else {'scope':'local_windows','start':0,'end':duration}
+    return {
+        'repeated_speech':{'status':'executed' if opening.get('status')=='executed' else 'unavailable',
+            'result':'review_required' if any(x['check_id']=='repeated_speech' for x in alerts) else 'unverified',
+            'coverage':coverage,'method':'text restart detectors plus independent acoustic opening windows',
+            'reason':'ASR cannot prove absence of repetition; opening: '+opening.get('reason',''),
+            'opening_status':opening.get('status','unavailable'), 'opening_coverage':opening.get('coverage',{})},
+        'breath_gaps':{'status':'executed','result':'review_required' if any(x['check_id']=='breath_gaps' for x in alerts) else 'unverified',
+            'coverage':coverage,'method':'silencedetect; silence is not breath classification',
+            'reason':'audio listening still required for breathing and intended pacing'},
+        'word_integrity':{'status':'unavailable','result':'unverified','coverage':coverage,
+            'method':'actual listening required; not inferred from ASR agreement or successful decoding',
+            'reason':'this script cannot verify complete phonemes or intended semantic repetition by listening'}
+    }
+
+
+def unique_alerts(source, alerts):
+    digest = sha256(source)
+    unique = {}
+    for x in alerts:
+        x = dict(x)
+        x.setdefault('id', stable_alert_id(digest,x['check_id'],x['start'],x['end'],x.get('kind',''),x.get('text','')))
+        if x['id'] in unique and unique[x['id']] != x:
+            raise ValueError('conflicting records share an alert ID; cannot silently discard a warning')
+        unique[x['id']] = x
+    return list(unique.values())
+
+
+def propagate_analysis_alerts(source, duration):
+    """Carry source warnings through the edit map, including removed-cut audits."""
+    path = source.parent/'edit-map.json'
+    if not path.is_file(): return [], {'status':'unavailable','reason':'no adjacent edit map; source warning lineage not available'}
+    mapping = json.loads(path.read_text(encoding='utf-8'))
+    if mapping.get('output_sha256') != sha256(source):
+        raise SystemExit('edit map belongs to another output media version')
+    ref = mapping.get('analysis_review')
+    if not ref: return [], {'status':'unavailable','reason':'legacy edit map has no source review reference'}
+    report_path = Path(ref['path'])
+    if not report_path.is_file() or sha256(report_path) != ref['sha256']:
+        raise SystemExit('source analysis review missing or changed; cannot discard unresolved alerts')
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    if report.get('source_sha256') != mapping.get('source_sha256'):
+        raise SystemExit('source analysis review hash mismatch')
+    alerts=[]
+    for old in report.get('alerts',[]):
+        if not old.get('review_required'): continue
+        portions=[]
+        for segment in mapping['kept_segments']:
+            a=max(old['start'],segment['source_start']); b=min(old['end'],segment['source_end'])
+            if b>a:
+                portions.append((segment['output_start']+a-segment['source_start'],segment['output_start']+b-segment['source_start']))
+        if not portions:
+            after=next((s for s in mapping['kept_segments'] if s['source_start']>=old['end']),None)
+            point=after['output_start'] if after else duration
+            portions=[(max(0,point-.3),min(duration,point+.5))]
+        for portion_index,(a,b) in enumerate(portions):
+            if b<=a: continue
+            alerts.append({'check_id':old['check_id'],'start':max(0,a),'end':min(duration,b),
+                'kind':'upstream_review','text':old.get('text',''),'review_required':True,
+                'id':stable_alert_id(sha256(source),old['check_id'],a,b,'upstream:'+old['id']+':'+str(portion_index),old.get('text','')),
+                'upstream_alert_id':old['id'],'upstream_report_sha256':ref['sha256'],
+                'reason':'source warning mapped to retained audio or deletion boundary; requires current-output recheck'})
+    return alerts, {'status':'executed','report':ref,'edit_map':{'path':str(path),'sha256':sha256(path)}}
+
+
 def analyze(args: argparse.Namespace) -> int:
     source=args.source.expanduser().resolve(); out=args.output_dir.expanduser().resolve()
     if not source.is_file(): raise SystemExit(f"source not found: {source}")
@@ -377,16 +499,17 @@ def analyze(args: argparse.Namespace) -> int:
     check=cached_recognition(source,audio,check_path,args,vad=True,condition=True) if not args.single_pass else None
 
     words=flatten_words(main); first=float(words[0]["start"]) if words else 0; last=float(words[-1]["end"]) if words else duration
+    opening=opening_audit(source,audio,out,args,words)
     candidates=[]; cid=1
     for s in silences:
         start,end,dur=s["start"],s["end"],s["duration"]
         decision="retain_or_review"; proposed_start=""; proposed_end=""; reason="normal breath/emphasis possible; do not delete by duration alone"
         if start <= 0.10 and first-start > 0.60:
-            proposed_start=0.0; proposed_end=max(0,first-0.12); decision="proposed_delete_pending_confirmation"; reason="leading silence; preserves about 120 ms before first detected word"
+            proposed_start=0.0; proposed_end=max(0,min(first,end)-0.12); decision="proposed_delete_pending_confirmation"; reason="leading measured silence only; ASR cannot extend this range across acoustic activity"
         elif end <= first:
             decision="covered_by_leading_trim"; reason="pre-speech region already covered by leading trim candidate"
         elif end >= duration-0.10 and end-last > 0.60:
-            proposed_start=min(duration,last+0.12); proposed_end=duration; decision="proposed_delete_pending_confirmation"; reason="trailing silence; preserves about 120 ms after last detected word"
+            proposed_start=min(duration,max(last,start)+0.12); proposed_end=duration; decision="proposed_delete_pending_confirmation"; reason="trailing measured silence only; ASR cannot extend this range across acoustic activity"
         elif start >= last:
             decision="covered_by_trailing_trim"; reason="post-speech region covered by trailing trim candidate when present"
         elif dur >= args.propose_internal:
@@ -412,14 +535,14 @@ def analyze(args: argparse.Namespace) -> int:
     opening_restarts=detect_opening_swallowed_restarts(check["segments"] if check else None,silences,fine_silences,args.retake_policy,source_fps)
     write_csv(out/"opening-retake-candidates.csv",opening_restarts,list(opening_restarts[0].keys()) if opening_restarts else ["id","decision","status"])
     opening_ranges=[(float(x["proposed_delete_start"]),float(x["proposed_delete_end"])) for x in opening_restarts if x.get("proposed_delete_start")]
-    fragment_restarts=fragment_restart_candidates(words) if args.retake_policy=="last_complete" else []
+    fragment_restarts=fragment_restart_candidates(words)
     decision_rows=[]
     for x in retakes:
         decision_rows.append({"candidate_id":x["id"],"candidate_type":"long_sentence_retake",
             "delete_start":x.get("proposed_delete_start",""),"delete_end":x.get("proposed_delete_end",""),
             "keep_start":x.get("last_attempt_start",""),"keep_end":x.get("last_attempt_end",""),
             "content":x.get("first_attempt_text",""),"evidence":f"similarity={x.get('similarity','')}; gap={x.get('gap_seconds','')}s",
-            "program_decision":"executable_with_last_complete_authorization" if x.get("proposed_delete_start") else "review_required",
+            "program_decision":"local_audio_review_required",
             "actual_execution":"not_executed_in_analysis"})
     for x in opening_restarts:
         decision_rows.append({"candidate_id":x["id"],"candidate_type":"opening_swallowed_restart",
@@ -438,75 +561,149 @@ def analyze(args: argparse.Namespace) -> int:
     proposed_total=sum(b-a for a,b in merged_proposed); estimated=max(0,duration-proposed_total)
     low=[{"start":f"{float(w['start']):.3f}","end":f"{float(w['end']):.3f}","word":w["word"],"probability":f"{float(w['probability']):.3f}","status":"text review; not corrected by guess"} for w in words if float(w.get("probability",1))<args.low_confidence]
     repeats=repeated_phrases(words)
-    fragment_restarts=fragment_restart_candidates(words) if args.retake_policy=="last_complete" else []
+    fragment_restarts=fragment_restart_candidates(words)
     review=[]
     for i,x in enumerate(low[:80],1): review.append({"id":f"L{i:03d}","type":"low_confidence_word","start":x["start"],"end":x["end"],"content":x["word"],"evidence":f"ASR probability {x['probability']}","status":x["status"]})
     for i,x in enumerate(repeats,1): review.append({"id":f"R{i:03d}","type":"possible_retake_or_semantic_repeat","start":f"{float(x['first_start']):.3f}","end":f"{float(x['repeat_end']):.3f}","content":x["phrase"],"evidence":f"nearby exact phrase repeated at {float(x['repeat_start']):.3f}s","status":x["status"]})
     for i,x in enumerate(fragment_restarts,1): review.append({"id":f"F{i:03d}","type":"possible_half_sentence_restart","start":f"{x['start']:.3f}","end":f"{x['end']:.3f}","content":x["content"],"evidence":x["evidence"],"status":x["status"]})
     write_csv(out/"review-items.csv",review,["id","type","start","end","content","evidence","status"])
 
+    alerts=candidate_alerts(fragment_restarts+repeats,duration,'full_media_asr')+opening['alerts']
+    for x in retakes:
+        alerts.append({'check_id':'repeated_speech','start':float(x['first_attempt_start']),
+            'end':float(x['last_attempt_end']),'kind':'long_sentence_retake','text':x['first_attempt_text'],
+            'review_required':True,'evidence':x})
+    for x in opening_restarts:
+        alerts.append({'check_id':'repeated_speech','start':float(x['failed_attempt_start']),
+            'end':float(x['anomalous_token_end']),'kind':'long_opening_token','text':x['anomalous_token'],
+            'review_required':True,'evidence':x})
+    for x in candidates:
+        if x['decision'].startswith('proposed'):
+            alerts.append({'check_id':'breath_gaps','start':float(x['silence_start']),
+                'end':float(x['silence_end']),'kind':'pause_candidate','text':'',
+                'review_required':True,'evidence':x})
+    for x in low:
+        if float(x['end'])>float(x['start']):
+            alerts.append({'check_id':'word_integrity','start':float(x['start']),'end':float(x['end']),
+                'kind':'low_confidence_word','text':x['word'],'review_required':True,'evidence':x})
+    machine=make_report(source,duration,review_checks(duration,alerts,opening),unique_alerts(source,alerts))
+    machine['stage']='analyze'
+    machine['detection_checks']={
+        'long_retake':{'status':'executed','count':len(retakes),'coverage':full_coverage(duration)},
+        'fragment_restart':{'status':'executed','count':len(fragment_restarts),'coverage':full_coverage(duration)},
+        'opening_overlap':{'status':opening['status'],'candidate_count':len(opening['alerts']),'coverage':opening.get('coverage',{}),'reason':opening.get('reason','')},
+        'second_full_asr':{'status':'skipped' if args.single_pass else 'executed',
+            'reason':'--single-pass; opening windows still required' if args.single_pass else 'same model cross-pass is not independent proof of clean speech'}}
+    (out/'review-report.json').write_text(json.dumps(machine,ensure_ascii=False,indent=2),encoding='utf-8')
+
     manifest={"source":str(source),"source_sha256":source_hash,"probe":meta,"stage":"analyze","source_modified":False,"model":args.model,"passes":1 if args.single_pass else 2,"parameters":{"silence_noise":args.silence_noise,"silence_min":args.silence_min,"propose_internal":args.propose_internal,"low_confidence":args.low_confidence,"retake_policy":args.retake_policy}}
     (out/"analysis-manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8")
-    summary={"source_duration_seconds":duration,"detected_word_count":len(words),"silence_candidate_count":len(candidates),"silence_proposed_range_count":len(proposed),"retake_group_count":len(retakes),"retake_proposed_range_count":len(retake_ranges),"opening_swallowed_restart_count":len(opening_restarts),"merged_proposed_range_count":len(merged_proposed),"proposed_delete_seconds":round(proposed_total,3),"estimated_original_speed_duration_seconds":round(estimated,3),"low_confidence_word_count":len(low),"repeat_candidate_count":len(repeats),"half_sentence_restart_candidate_count":len(fragment_restarts),"retake_policy":args.retake_policy,"human_listening":"not performed","editing_performed":False}
+    summary={"source_duration_seconds":duration,"detected_word_count":len(words),"silence_candidate_count":len(candidates),"silence_proposed_range_count":len(proposed),"retake_group_count":len(retakes),"retake_proposed_range_count":len(retake_ranges),"opening_swallowed_restart_count":len(opening_restarts),"effective_opening_candidate_count":len(opening["alerts"]),"merged_proposed_range_count":len(merged_proposed),"proposed_delete_seconds":round(proposed_total,3),"estimated_original_speed_duration_seconds":round(estimated,3),"low_confidence_word_count":len(low),"repeat_candidate_count":len(repeats),"half_sentence_restart_candidate_count":len(fragment_restarts),"retake_policy":args.retake_policy,"human_listening":"not performed","editing_performed":False,"command_status":"completed","quality_status":machine["quality_status"],"detection_checks":machine["detection_checks"],"unresolved_alert_count":len(machine["alerts"])}
     (out/"analysis-summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
     transcript_text="\n".join(f"- {s['start']:.2f}–{s['end']:.2f}：{s['text'].strip()}" for s in main["segments"])
-    report=f"""# 口播原片分析报告\n\n## 范围\n\n本轮仅分析，没有剪切、变速、渲染或生成剪映工程。全部拟删区间等待用户确认；未进行真人耳听。\n\n## 输入\n\n- 文件：`{source}`\n- SHA256：`{source_hash}`\n- 时长：{duration:.3f}秒\n- 本地ASR：faster-whisper {args.model} int8，{1 if args.single_pass else 2}路\n- 重录策略：`{args.retake_policy}`\n\n## 自动候选\n\n- 静音候选：{len(candidates)}处，其中{len(proposed)}处提出缩短\n- 连续重录组：{len(retakes)}组，其中{len(retake_ranges)}组达到机器高置信拟删条件\n- 开场ASR吞并重录候选：{len(opening_restarts)}组\n- 合并去重后的拟删区间：{len(merged_proposed)}处，共{proposed_total:.3f}秒\n- 原速预计时长：{estimated:.3f}秒\n- 低置信词：{len(low)}项\n- 近距离重复表达候选：{len(repeats)}项\n\n详细静音区间见 `silence-candidates.csv`，长句重录组见 `retake-candidates.csv`，开场吞并候选见`opening-retake-candidates.csv`，其他文字疑点见 `review-items.csv`。`last_complete`只提出候选，最后一次完整性仍需试听或用户确认。\n\n## 主转写\n\n{transcript_text}\n\n## 状态\n\n- 哈希、媒体参数、波形、逐词时间、静音候选、重录候选：已生成\n- 真人听校、吞字判断、最后一句完整性：未验证\n- 实际剪辑：未执行\n"""
+    report=f"""# 口播原片分析报告\n\n## 范围\n\n本轮仅分析，没有剪切、变速、渲染或生成剪映工程。全部拟删区间等待用户确认；未进行真人耳听。\n\n## 输入\n\n- 文件：`{source}`\n- SHA256：`{source_hash}`\n- 时长：{duration:.3f}秒\n- 本地ASR：faster-whisper {args.model} int8，{1 if args.single_pass else 2}路\n- 重录策略：`{args.retake_policy}`\n\n## 自动候选\n\n- 静音候选：{len(candidates)}处，其中{len(proposed)}处提出缩短\n- 连续重录组：{len(retakes)}组，其中{len(retake_ranges)}组达到机器高置信拟删条件\n- 开场异常长词候选：{len(opening_restarts)}组；有效发声开场多尺度候选：{len(opening["alerts"])}项（执行状态：{opening["status"]}）\n- 合并去重后的拟删区间：{len(merged_proposed)}处，共{proposed_total:.3f}秒\n- 原速预计时长：{estimated:.3f}秒\n- 低置信词：{len(low)}项\n- 近距离重复表达候选：{len(repeats)}项\n\n详细静音区间见 `silence-candidates.csv`，长句重录组见 `retake-candidates.csv`，开场吞并候选见`opening-retake-candidates.csv`，其他文字疑点见 `review-items.csv`。`last_complete`只提出候选，最后一次完整性仍需试听或用户确认。\n\n## 主转写\n\n{transcript_text}\n\n## 状态\n\n- 哈希、媒体参数、波形、逐词时间、静音候选、重录候选：已生成\n- 真人听校、吞字判断、最后一句完整性：未验证\n- 实际剪辑：未执行\n"""
+    report += f"\n- 命令执行：completed；质量状态：{machine['quality_status']}；未解决警报：{len(machine['alerts'])}\n- 有效开场分窗：{opening['status']}；策略 none 不关闭检测。\n- 每项执行范围及原因见 review-report.json；零候选不能代替原音复核。\n"
     (out/"analysis-report.md").write_text(report,encoding="utf-8")
     print(json.dumps({"output_dir":str(out),"summary":summary},ensure_ascii=False,indent=2))
     return 0
 
 
 def review_stage(args: argparse.Namespace) -> int:
-    """Actual local recognition; all detected repeats remain review candidates."""
+    """Run detection, preserving uncertainty and source-to-output alert lineage."""
     source=args.source.expanduser().resolve(); out=ascii_output(args.output_dir.expanduser().resolve())
-    if not source.is_file(): raise SystemExit("source not found")
+    if not source.is_file(): raise SystemExit('source not found')
     out.mkdir(parents=True,exist_ok=True)
-    duration=float(probe(source)["format"]["duration"])
+    duration=float(probe(source)['format']['duration'])
+    audio=out/'source-16k-mono.wav'; extract_audio(source,audio)
+    full=args.stage=='residual-check'
     windows=[]
-    if args.stage == "residual-check":
+    if full:
         windows=[(0.0,duration)]
     else:
+        requested=[]
         if args.window:
-            for text in args.window:
-                a,b=map(float,text.split(":",1)); windows.append((a,b))
+            requested=[tuple(map(float,t.split(':',1))) for t in args.window]
         elif args.candidates:
             path=args.candidates.expanduser().resolve()
-            items=json.loads(path.read_text(encoding="utf-8-sig")) if path.suffix==".json" else list(csv.DictReader(path.open(encoding="utf-8-sig")))
-            if isinstance(items,dict): items=items.get("candidates",[])
-            for item in items:
-                a=float(item["start"]); b=float(item["end"])
-                a=max(0,a-.6); b=min(duration,b+.6)
-                while a<b:
-                    windows.append((a,min(b,a+4))); a+=2.8
-        else: raise SystemExit("local-review needs --window START:END or --candidates JSON/CSV")
-    reports=[]; base_key=recognition_key(source,args)
-    for i,(a,b) in enumerate(windows):
-        if not 0<=a<b<=duration+.01: raise SystemExit("invalid review window")
-        # Source identity + window settings are in the key, not the temporary WAV hash.
-        key=base_key|{"window":[a,b]}
-        target=out/f"window-{i:04d}.json"; audio=out/f"window-{i:04d}.wav"
-        if target.exists():
-            transcript=json.loads(target.read_text(encoding="utf-8"))
-            if transcript.get("cache_key")!=key: raise SystemExit("local review cache mismatch; use new directory")
-        else:
-            run(["ffmpeg","-v","error","-y","-ss",str(a),"-i",str(source),"-t",str(b-a),"-vn","-ar","16000","-ac","1",str(audio)],capture=False)
-            from faster_whisper import WhisperModel
-            if i==0 or "model" not in locals():
-                model=WhisperModel(args.model,device="cpu",compute_type="int8",local_files_only=True,cpu_threads=args.cpu_threads)
-            transcript=transcribe(model,audio,False,False,None)
-            for segment in transcript["segments"]:
-                segment["start"]+=a; segment["end"]+=a
-                for word in segment["words"]: word["start"]+=a; word["end"]+=a
-            transcript.update({"source_sha256":key["source_sha256"],"cache_key":key,"coordinate_system":"input_media_seconds"})
-            target.write_text(json.dumps(transcript,ensure_ascii=False,indent=2),encoding="utf-8")
-        candidates=fragment_restart_candidates(flatten_words(transcript))+repeated_phrases(flatten_words(transcript))
-        reports.append({"window":[a,b],"transcript":str(target),"candidates":candidates})
-    report={"source":str(source),"source_sha256":sha256(source),"stage":args.stage,
-            "status":"review_required" if any(x["candidates"] for x in reports) else "no_machine_candidate_found",
-            "windows":reports,"human_listening":"not performed","semantic_completeness":"not verified",
-            "note":"No candidate is a guarantee of zero repetition; candidates never authorize deletion."}
-    (out/"review-report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
-    print(json.dumps(report,ensure_ascii=False,indent=2)); return 0
+            items=json.loads(path.read_text(encoding='utf-8-sig')) if path.suffix=='.json' else list(csv.DictReader(path.open(encoding='utf-8-sig')))
+            if isinstance(items,dict): items=items.get('alerts',items.get('candidates',[]))
+            requested=[(float(x['start']),float(x['end'])) for x in items]
+        else: raise SystemExit('local-review needs --window START:END or --candidates JSON/CSV')
+        for a,b in requested:
+            if not 0<=a<b<=duration+.01: raise SystemExit('invalid review window')
+            # Preserve the precise requested fragment and add overlapping context.
+            windows.append((a,min(duration,b)))
+            cursor=max(0,a-.4); end=min(duration,b+.6)
+            while cursor<end:
+                finish=min(end,cursor+2.5); windows.append((cursor,finish))
+                if finish>=end: break
+                cursor+=1.0
+    windows=list(dict.fromkeys(windows))
+    decoder=OpeningDecoder(source,out/'windows',args)
+    reports=[]; alerts=[]; first_words=[]
+    from opening_review import source_relative_words
+    for a,b in windows:
+        try:
+            transcript=decoder({'start':a,'end':b})
+            local=flatten_words(transcript)
+            # Zero-duration tokens carry no reliable acoustic span; the other
+            # decoded words remain usable. Explicitly record these anomalies.
+            invalid=[w for w in local if float(w['end'])<=float(w['start'])]
+            words=source_relative_words([w for w in local if float(w['end'])>float(w['start'])],a)
+            if a==0: first_words=words
+            candidates=fragment_restart_candidates(words)+repeated_phrases(words)
+            alerts.extend(candidate_alerts(candidates,duration,'residual_asr' if full else 'feedback_overlap'))
+            for w in invalid:
+                at=max(0,min(duration-.08,a+float(w['start'])))
+                alerts.append({'check_id':'word_integrity','start':at,'end':min(duration,at+.08),
+                    'kind':'invalid_word_timing','text':w['word'],'review_required':True,
+                    'reason':'zero-duration ASR word; timing cannot certify an intact syllable'})
+            reports.append({'window':[a,b],'status':'executed','words':words,'candidates':candidates})
+        except (OSError,ValueError,RuntimeError,ImportError) as error:
+            reports.append({'window':[a,b],'status':'unavailable','reason':str(error),'candidates':[]})
+    opening=opening_audit(source,audio,out,args,first_words,decoder=decoder)
+    alerts.extend(opening['alerts'])
+    silence=run(['ffmpeg','-hide_banner','-i',str(audio),'-af','silencedetect=noise=-42dB:d=0.35','-f','null','-'])
+    for item in parse_silence(silence.stderr,duration):
+        if item['end']>item['start']:
+            alerts.append({'check_id':'breath_gaps','start':item['start'],'end':item['end'],
+                'kind':'pause_review','text':'','review_required':True,
+                'reason':'measured quiet interval; listen to distinguish breath, pacing, or dead air'})
+    inherited,lineage=propagate_analysis_alerts(source,duration)
+    alerts.extend(inherited)
+    feedback=getattr(args,'feedback',None)
+    comparison=None
+    if feedback:
+        reference=getattr(args,'reference_source',None)
+        reference_windows=getattr(args,'reference_window',None)
+        if not reference or not reference_windows:
+            raise SystemExit('user feedback review requires --reference-source and --reference-window for original/current comparison')
+        other=argparse.Namespace(**vars(args))
+        other.source=reference; other.output_dir=out/'reference_review'; other.stage='local-review'
+        other.window=reference_windows; other.candidates=None; other.feedback=None
+        other.reference_source=None; other.reference_window=[]
+        review_stage(other)
+        ref=other.output_dir/'review-report.json'
+        comparison={'path':str(ref),'sha256':sha256(ref),'source_sha256':sha256(reference.expanduser().resolve())}
+        a,b=windows[0]
+        alerts.append({'check_id':'word_integrity','start':a,'end':b,'kind':'user_feedback',
+            'text':feedback,'review_required':True,'reason':'compare original and current audio; prior transcript cannot dismiss feedback',
+            'reference_report':comparison})
+    checks=review_checks(duration,alerts,opening,full=full)
+    if any(x['status']!='executed' for x in reports):
+        checks['repeated_speech'].update(status='unavailable',reason='one or more requested ASR windows failed; incomplete detection')
+    if full and lineage['status']!='executed':
+        checks['word_integrity']['reason']+='; '+lineage['reason']
+    report=make_report(source,duration,checks,unique_alerts(source,alerts))
+    report.update(stage=args.stage,windows=reports,opening_review={'path':str(out/'opening-review.json'),
+        'sha256':sha256(out/'opening-review.json'),'status':opening['status']},source_review_lineage=lineage,
+        reference_review=comparison,semantic_completeness='not verified',
+        note='Command completion and ASR agreement do not establish speech quality. Resolve every alert against this exact media/report.')
+    (out/'review-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    print(json.dumps({'report':str(out/'review-report.json'),'command_status':'completed',
+        'quality_status':report['quality_status'],'unresolved_alerts':len(report['alerts']),
+        'checks':checks},ensure_ascii=False,indent=2))
+    return 0
 
 
 def rough_cut(args: argparse.Namespace) -> int:
@@ -556,12 +753,12 @@ def rough_cut(args: argparse.Namespace) -> int:
                 if evidence.get("source_sha256")!=source_hash or evidence.get("status")!="verified_acoustic_bounds":
                     raise SystemExit("acoustic evidence must be source-bound and explicitly verified")
                 cut_start=frame_safe_retake_cut_start(float(evidence["previous_word_end"]),float(evidence["failed_audio_onset"]),float(Fraction(output_fps)))
-                if cut_end>float(evidence["last_complete_audio_onset"]):
-                    raise SystemExit("delete end overlaps the last complete take's measured onset")
+                if math.ceil(cut_end*float(Fraction(output_fps))-1e-8)/float(Fraction(output_fps))>float(evidence["last_complete_audio_onset"]):
+                    raise SystemExit("frame-quantized delete end overlaps the last complete take's measured onset")
                 boundary_evidence.append({"candidate_id":row["candidate_id"],"evidence":str(evidence_path),
                                           "evidence_sha256":sha256(evidence_path),"resolved_start":cut_start})
-            elif row.get("candidate_type") in ("short_fragment_or_swallowed_restart","opening_swallowed_restart"):
-                raise SystemExit("short/swallowed retake execution requires source-bound acoustic_evidence")
+            elif row.get("candidate_type") in ("short_fragment_or_swallowed_restart","opening_swallowed_restart","long_sentence_retake"):
+                raise SystemExit("retake execution requires source-bound acoustic_evidence; ASR similarity is not a cut boundary")
             deletes.append((cut_start,cut_end,
                             f"approved candidate {row['candidate_id']}: {row.get('candidate_type','retake')}"))
     for i,value in enumerate(args.confirmed_delete,1):
@@ -604,11 +801,14 @@ def rough_cut(args: argparse.Namespace) -> int:
         out_cursor += end-start
     delete_rows=[{"id":f"D{i:03d}","source_start":f"{a:.6f}","source_end":f"{b:.6f}","duration":f"{b-a:.6f}","reason":reason,"authorization":"explicit current-stage rough-cut authorization"} for i,(a,b,reason) in enumerate(deletes,1)]
     write_csv(out/"deleted-ranges.csv",delete_rows,["id","source_start","source_end","duration","reason","authorization"])
-    edit_map={"source":str(source),"source_sha256":source_hash,"speed":1.0,"deleted_source_ranges":delete_rows,"kept_segments":mapped,"planned_output_duration":round(out_cursor,6),
+    analysis_ref=analysis/'review-report.json'
+    source_review=({'path':str(analysis_ref),'sha256':sha256(analysis_ref),'source_sha256':source_hash}
+                   if analysis_ref.is_file() else None)
+    edit_map={"output_sha256":sha256(media),"analysis_review":source_review,"source":str(source),"source_sha256":source_hash,"speed":1.0,"deleted_source_ranges":delete_rows,"kept_segments":mapped,"planned_output_duration":round(out_cursor,6),
               "frame_rate":output_fps,"boundary_evidence":boundary_evidence,"coordinate_precision":"frame-quantized source trims; audio follows same boundaries"}
     (out/"edit-map.json").write_text(json.dumps(edit_map,ensure_ascii=False,indent=2),encoding="utf-8")
     validation=media_validation(media,meta,output_fps,expected_duration=out_cursor)
-    validation.update({"source_hash_match":True,"speed":1.0,"cuts":len(deletes),"residual_check":"not performed; run residual-check on this exact media"})
+    validation.update({"source_hash_match":True,"speed":1.0,"cuts":len(deletes),"command_status":"completed","quality_status":"unverified","residual_check":"not performed; run residual-check on this exact media"})
     listening=out/"cut-listening"; listening.mkdir(exist_ok=True)
     clips=[]
     cut_points=[row["output_end"] for row in mapped[:-1]]
@@ -623,7 +823,7 @@ def rough_cut(args: argparse.Namespace) -> int:
     (listening/"manifest.json").write_text(json.dumps({"media_sha256":sha256(media),"clips":clips},indent=2),encoding="utf-8")
     validation["listening_manifest"]=str(listening/"manifest.json")
     (out/"validation.json").write_text(json.dumps(validation,ensure_ascii=False,indent=2),encoding="utf-8")
-    print(json.dumps({"status":"completed" if validation["spec_status"]=="passed" else "blocked","media":str(media),"edit_map":str(out/"edit-map.json"),"deleted_ranges":str(out/"deleted-ranges.csv"),"validation":validation},ensure_ascii=False,indent=2))
+    print(json.dumps({"status":"render_completed_quality_unverified" if validation["spec_status"]=="passed" else "blocked","media":str(media),"edit_map":str(out/"edit-map.json"),"deleted_ranges":str(out/"deleted-ranges.csv"),"validation":validation},ensure_ascii=False,indent=2))
     return 0 if validation["spec_status"]=="passed" else 2
 
 
@@ -906,6 +1106,9 @@ def main() -> int:
         review.add_argument("--source",type=Path,required=True); review.add_argument("--output-dir",type=Path,required=True)
         review.add_argument("--model",default=os.environ.get("XX3ZDJJ_MODEL_PATH","medium")); review.add_argument("--cpu-threads",type=int,default=4)
         review.add_argument("--window",action="append",default=[]); review.add_argument("--candidates",type=Path)
+        review.add_argument("--feedback",help="user-reported issue; requires original/current comparison")
+        review.add_argument("--reference-source",type=Path)
+        review.add_argument("--reference-window",action="append",default=[])
     for parser in sub.choices.values():
         parser.add_argument("--project-config",type=Path,default=argparse.SUPPRESS)
     args=ap.parse_args()

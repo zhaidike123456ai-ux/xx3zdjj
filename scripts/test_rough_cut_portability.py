@@ -1,4 +1,7 @@
 import csv
+import array
+import math
+import wave
 import json
 import os
 import shutil
@@ -51,6 +54,41 @@ class RoughCutTests(unittest.TestCase):
         self.assertTrue(all(Path(x["path"]).is_file() for x in clips))
         self.assertEqual(file_hash(self.source),
                          json.loads((self.analysis / "analysis-manifest.json").read_text())["source_sha256"])
+
+    def test_render_removes_first_burst_and_preserves_second_onset(self):
+        # Synthetic acoustic regression, not a claim about natural syllables.
+        wav=self.root/'two_bursts.wav'; rate=48000
+        samples=array.array('h')
+        for n in range(rate*2):
+            t=n/rate
+            frequency=1200 if .50<=t<.68 else 2400 if 1.02<=t<1.35 else 0
+            samples.append(round(14000*math.sin(2*math.pi*frequency*t)) if frequency else 0)
+        if sys.byteorder!='little': samples.byteswap()
+        with wave.open(str(wav),'wb') as stream:
+            stream.setnchannels(1);stream.setsampwidth(2);stream.setframerate(rate);stream.writeframes(samples.tobytes())
+        self.source=self.root/'opening.mp4'
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','color=s=64x96:r=30:d=2',
+                        '-i',str(wav),'-shortest','-c:v','libx264','-pix_fmt','yuv420p','-c:a','alac',str(self.source)],check=True,capture_output=True)
+        (self.analysis/'analysis-manifest.json').write_text(json.dumps({'source_sha256':file_hash(self.source)}))
+        result=self.run_cut('--confirmed-delete','0:1.0:synthetic labelled first-burst removal')
+        self.assertEqual(result.returncode,0,result.stderr)
+        mapping=json.loads((self.output/'edit-map.json').read_text())
+        self.assertEqual(mapping['kept_segments'][0]['source_start'],1.0)
+        media=next(self.output.glob('*.mp4'))
+        pcm=subprocess.run(['ffmpeg','-v','error','-i',str(media),'-vn','-ac','1','-ar',str(rate),'-f','s16le','-'],check=True,capture_output=True).stdout
+        values=array.array('h'); values.frombytes(pcm)
+        if sys.byteorder!='little':values.byteswap()
+        def amplitude(frequency,start,end):
+            part=values[round(start*rate):round(end*rate)]
+            real=sum(x*math.cos(2*math.pi*frequency*n/rate) for n,x in enumerate(part))
+            imag=sum(x*math.sin(2*math.pi*frequency*n/rate) for n,x in enumerate(part))
+            return 2*math.hypot(real,imag)/len(part)
+        # The first 40 ms of the preserved burst must survive at expected onset;
+        # measuring only the middle of the burst would miss clipped beginnings.
+        self.assertGreater(amplitude(2400,.020,.060),10000)
+        self.assertLess(amplitude(1200,0,.35),500)
+        validation=json.loads((self.output/'validation.json').read_text())
+        self.assertEqual(validation['quality_status'],'unverified')
 
     def test_missing_decision_does_not_silently_ignore_approval(self):
         result = self.run_cut("--approve-candidate", "RT1")

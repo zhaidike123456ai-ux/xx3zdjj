@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from stage_gate import CHECKS, file_hash, validate_report
+from review_state import REQUIRED_CHECKS, full_coverage, make_report
+from test_review_state import synthetic_lineage
 
 
 class StageGateTests(unittest.TestCase):
@@ -17,8 +19,15 @@ class StageGateTests(unittest.TestCase):
         self.source.write_bytes(b"synthetic gate test; not a media quality test")
         (self.root / "evidence.txt").write_text("test fixture", encoding="utf-8")
         self.report = self.root / "gate.json"
+        self.residual_path = self.root / "residual.json"
+        self.residual_data = make_report(self.source, 1.0, {
+            key: {"status": "executed", "result": "passed", "method": "synthetic detector fixture",
+                  "coverage": full_coverage(1.0)} for key in REQUIRED_CHECKS}, [])
+        self.residual_data['source_review_lineage'] = synthetic_lineage(self.root, self.source, 1.0)
+        self.residual_path.write_text(json.dumps(self.residual_data), encoding="utf-8")
         self.data = {
             "stage": "rough-cut",
+            "residual_review": {"report": {"path": "residual.json", "sha256": file_hash(self.residual_path)}},
             "artifacts": {"source": {"sha256": file_hash(self.source)}},
             "checks": {key: {"status": "passed", "method": "synthetic test",
                               "evidence": ["evidence.txt"]}
@@ -35,6 +44,22 @@ class StageGateTests(unittest.TestCase):
 
     def test_valid_record(self):
         self.assertEqual(self.check(), [])
+
+    def test_legacy_without_current_residual_review_blocks(self):
+        del self.data["residual_review"]
+        self.assertTrue(any("residual-review" in e for e in self.check()))
+
+    def test_zero_counts_cannot_hide_unresolved_review_alert(self):
+        self.residual_data["alerts"] = [{"id": "alert-synthetic", "check_id": "repeated_speech",
+                                        "start": .2, "end": .4, "review_required": True}]
+        self.residual_data["quality_status"] = "review_required"
+        self.residual_path.write_text(json.dumps(self.residual_data))
+        self.data["residual_review"]["report"]["sha256"] = file_hash(self.residual_path)
+        self.assertTrue(any("unresolved review_required" in e for e in self.check()))
+
+    def test_changed_residual_reference_blocks(self):
+        self.residual_path.write_text(self.residual_path.read_text() + " ")
+        self.assertTrue(any("report changed" in e for e in self.check()))
 
     def test_changed_media(self):
         self.source.write_bytes(b"changed version")

@@ -87,10 +87,21 @@ class MediaIntegrationTests(unittest.TestCase):
     def gate(self,stage,artifacts):
         evidence=self.root/'evidence.txt'; evidence.write_text('synthetic approval fixture, not user or acoustic acceptance')
         report=self.root/(stage+'.json')
-        report.write_text(json.dumps({"stage":stage,"artifacts":{k:{"sha256":sha256(v)} for k,v in artifacts.items()},
+        data={"stage":stage,"artifacts":{k:{"sha256":sha256(v)} for k,v in artifacts.items()},
                                      "checks":{k:{"status":"passed","method":"synthetic gate fixture","evidence":[str(evidence)]} for k in CHECKS[stage]},
                                      "blocking_counts":{"approved_not_executed":0,"known_unfixed":0,"unresolved":0},
-                                     "user_approval":{"status":"approved","message":"synthetic test","recorded_at":"fixture","evidence":str(evidence)}}))
+                                     "user_approval":{"status":"approved","message":"synthetic test","recorded_at":"fixture","evidence":str(evidence)}}
+        if stage == 'rough-cut':
+            from review_state import REQUIRED_CHECKS, full_coverage, make_report
+            from test_review_state import synthetic_lineage
+            source=artifacts['source']; duration=3.0
+            residual=make_report(source,duration,{k:{'status':'executed','result':'passed','method':'synthetic gate fixture',
+                                                   'coverage':full_coverage(duration)} for k in REQUIRED_CHECKS},[])
+            residual['source_review_lineage']=synthetic_lineage(self.root,source,duration)
+            residual_path=self.root/'synthetic-residual-review.json'
+            residual_path.write_text(json.dumps(residual))
+            data['residual_review']={'report':{'path':str(residual_path),'sha256':sha256(residual_path)}}
+        report.write_text(json.dumps(data))
         return report
 
     def cli(self,*args):

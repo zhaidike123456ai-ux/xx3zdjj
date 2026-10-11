@@ -13,6 +13,10 @@
   "checks": {
     "G1": {"status": "passed", "method": "实际检查方法与覆盖范围", "evidence": ["实际证据文件"]}
   },
+  "residual_review": {
+    "report": {"path": "residual/review-report.json", "sha256": "报告文件SHA256"},
+    "resolutions": {"path": "residual/resolutions.json", "sha256": "实际处理记录SHA256"}
+  },
   "blocking_counts": {"approved_not_executed": 0, "known_unfixed": 0, "unresolved": 0},
   "user_approval": {
     "status": "approved",
@@ -36,3 +40,31 @@
 当前规则要求该阶段具体用户批准；用户只是同意继续研究或选字体，不代表批准媒体。测试预览可交用户核对，但不能自动进入下一阶段。只改字幕显示位置/字号也会改变ASS，需新确认；不需要为此重新转写。重剪源音频需新对齐与确认。
 
 小白只看完整预览和简短问题，不填写JSON。执行代理保存报告，命令与内部数据不要求用户操作。运行`python scripts/test_stage_gate.py`验证阻断行为；这是记录校验测试，不是媒体质量验收。
+
+## 粗剪警报闭环（v2.1.0 起）
+
+`rough-cut` 的零计数不能替代 `residual_review`。检查器读取真正的残留报告，逐项校验执行状态、范围、警报 ID 和媒体 hash；缺失或 legacy 报告不能通过。`resolutions` 无需填写没有的处理结论，存在待核项时由执行代理根据真实听校记录生成。
+
+残留报告必须保留 `source_review_lineage` 的分析报告和 edit-map 引用及 hash，绑定同一原片与当前成片。每个上游警报的保留分片或删除后衔接处都要进入当前复核。移走成片导致引用丢失不能当作无报警。
+
+处理记录结构示意（占位内容不能用于通过检查）：
+
+```json
+{
+  "schema_version": 1,
+  "source_sha256": "当前成片SHA256",
+  "report_sha256": "残留报告SHA256",
+  "alerts": [{
+    "alert_id": "报告中的真实警报ID",
+    "outcome": "retain_normal_repetition",
+    "assessment": "实际复听后的判断",
+    "reviewer": {"kind": "user", "method": "user_listening", "recorded_at": "实际时间", "quote": "实际反馈"},
+    "evidence": [{"path": "actual_listening_record.md", "sha256": "证据文件SHA256", "kind": "listening_confirmation"}]
+  }],
+  "check_resolutions": []
+}
+```
+
+`check_resolutions` 用于机器未验证的检查：每项包含 `check_id`、`outcome: verified`、实际完整覆盖 `coverage: {scope: full_media, start: 0, end: 实际时长}`，以及同样的 assessment、reviewer、evidence。仅有 ASR 文本不算耳听。具备真实音频能力的代理可用 `kind: agent`、`method: agent_audio_listening` / `agent_av_review` 和对应 `capability: audio_listening` / `audio_video_review` 记录实际结果，不能虚构能力。
+
+`fixed` 不能关闭旧媒体上的警报；修改媒体后必须重新生成残留报告。未解决警报一条也不能用补核记录绕过。校验器只验证结构与证据一致性，不认证听懂声音。见 [原音复核流程](speech-review.md)。

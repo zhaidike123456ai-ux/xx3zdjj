@@ -139,6 +139,14 @@ talking_head_studio/
 
 剪映版本可能影响兼容性。静态检查通过不等于目标电脑已完整打开、可编辑、重开和导出通过。详见 [剪映适配](references/jianying.md) 与 [验收说明](references/testing.md)。
 
+## v2.1.0：重说检测与验收修复
+
+这版修改了媒体处理脚本：默认不自动删重说时也会检测；在人声实际开头执行多尺度分窗，避免长前导空白和全片 ASR 合并单字导致漏检。每项检查标明实际执行、跳过或不可用，未处理警报会阻止进入字幕阶段。详见 [检测与警报处理](references/speech-review.md)。
+
+本次在 macOS ARM64 完成 147 项测试（包含合成媒体与已标注真实开场回归）；真实样本的长窗仍省略重复，新增合并短窗识别出“我我发现”。这些结果不等于任意口误都能检出，也不是 Windows 实机验收。
+
+旧版报告需要重新分析并复核，不能直接沿用“零问题”。更新 Skill 不会自动修复已生成的视频；正常叠词和强调仍需原音判断。下载包不包含私人测试素材。
+
 ## 开发与测试
 
 v2.0.0 发布前在 macOS ARM64 完成 73 项单元/合成媒体回归，另有短重说检测与字幕连接自检。模型合成推理证明入口可执行，不代表真人口误识别准确率。没有把私人测试视频或本机审计记录放入仓库。
@@ -147,11 +155,11 @@ v2.0.0 发布前在 macOS ARM64 完成 73 项单元/合成媒体回归，另有�
 
 ```bash
 cd scripts
-python -B -S -m unittest test_runtime test_studio_manager test_stage_gate test_jianying_adapter test_media_quality.TextQualityTests
+python -B -S -m unittest test_runtime test_studio_manager test_stage_gate test_review_state test_opening_review test_retake_pipeline test_retake_detection test_jianying_adapter test_media_quality.TextQualityTests
 python -B -S test_retake_detection.py
 ```
 
-上述轻量套件在 macOS 上实跑 62 项通过，另 9 个重说检测用例通过。完整媒体测试还需要带 `ass` 滤镜的 FFmpeg、FFprobe、Pillow 和本机字体：
+早期 v2.0.0 的轻量套件为 62 项，另有 9 个重说检测用例。新版增加开场分窗、默认策略、警报闭环、版本绑定和帧对齐保护回归；实际测试数量与结果见对应 Release。完整媒体测试还需要带 `ass` 滤镜的 FFmpeg、FFprobe、Pillow 和本机字体：
 
 ```bash
 python -B -m unittest discover -s scripts -p 'test_*.py'
