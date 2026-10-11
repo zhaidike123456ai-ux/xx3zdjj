@@ -1,6 +1,6 @@
 # 本地环境与可复用安装
 
-环境检查默认只读。已有工具逐项核验后复用，不因版本比固定新安装版本低就重新安装；FFmpeg必须实际包含 `ass/overlay/geq/trim/atrim/crop/scale/concat` 和 `libx264/aac`。只看 `-version` 不算可用。所有补装都放在本机用户目录，不写全局 pip/npm、不覆盖其他项目，不收费、不上传媒体。不会自动安装其他 Skill，不运行 Remotion/HyperFrames 的 Skill/init/scaffold 子命令。
+环境检查默认只读。已有工具逐项核验后复用，不因版本比固定新安装版本低就重新安装；FFmpeg必须实际包含 `ass/overlay/geq/trim/atrim/crop/scale/concat` 和 `libx264/aac`。只看 `-version` 不算可用。所有补装都放在本机用户目录，不写全局 pip/npm、不覆盖其他项目、不上传媒体。不会自动安装其他 Skill，不运行 Remotion/HyperFrames 的 Skill/init/scaffold 子命令。
 
 ## 入口
 
