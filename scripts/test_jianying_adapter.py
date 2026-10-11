@@ -15,7 +15,7 @@ class AdapterTests(unittest.TestCase):
         self.root=Path(self.tmp.name);self.timeline=self.root/'timeline.json';self.report=self.root/'approval.json'
         for name in ['source.mp4','background.mp4','preview.mp4']:(self.root/name).write_bytes(name.encode())
         (self.root/'captions.ass').write_text('[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.10,0:00:01.00,Default,,0,0,0,,你好\nDialogue: 0,0:00:01.00,0:00:01.90,Default,,0,0,0,,世界',encoding='utf-8')
-        (self.root/'evidence.txt').write_text('SYNTHETIC evidence; not actual media/user approval')
+        (self.root/'evidence.txt').write_text('SYNTHETIC evidence; not actual media/user approval', encoding="utf-8")
         def media(name):return {'path':name,'sha256':ja.file_hash(self.root/name),'width':720,'height':1280,'fps':'30/1','frame_count':60}
         self.spec={'schema_version':1,'project_kind':'full','mode':'approved-clean','source':media('source.mp4'),'background':media('background.mp4'),
           'preview':{'path':'preview.mp4','sha256':ja.file_hash(self.root/'preview.mp4')},'captions':{'path':'captions.ass','sha256':ja.file_hash(self.root/'captions.ass'),'format':'ass'},
@@ -58,7 +58,7 @@ class AdapterTests(unittest.TestCase):
         self.spec['keep_ranges'][0]['end_frame']=30;self.refresh()
         with self.assertRaises(ValueError):self.build()
         self.spec['keep_ranges'][0]['end_frame']=25
-        (self.root/'captions.ass').write_text('[Events]\nDialogue: 0,0:00:01.80,0:00:03.00,Default,,0,0,0,,超界')
+        (self.root/'captions.ass').write_text('[Events]\nDialogue: 0,0:00:01.80,0:00:03.00,Default,,0,0,0,,超界', encoding="utf-8")
         self.spec['captions']['sha256']=ja.file_hash(self.root/'captions.ass');self.refresh()
         with self.assertRaises(ValueError):self.build()
     def test_pipeline_srt_entities_decode_once_ass_literal_preserved(self):

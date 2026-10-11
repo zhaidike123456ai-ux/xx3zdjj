@@ -21,7 +21,7 @@ def synthetic_lineage(root, source, duration):
     mapping = root / 'edit-map.json'
     mapping.write_text(json.dumps({'source_sha256': file_hash(original), 'output_sha256': file_hash(source),
                                   'analysis_review': reference, 'kept_segments': [
-                                      {'source_start': 0, 'source_end': duration, 'output_start': 0, 'output_end': duration}]}))
+                                      {'source_start': 0, 'source_end': duration, 'output_start': 0, 'output_end': duration}]}), encoding="utf-8")
     return {'status': 'executed', 'edit_map': {'path': str(mapping), 'sha256': file_hash(mapping)}, 'report': reference}
 
 
@@ -35,7 +35,7 @@ class ReviewStateTests(unittest.TestCase):
         self.report_path = self.root / 'residual.json'
         self.resolutions_path = self.root / 'resolutions.json'
         self.confirmation = self.root / 'listening.txt'
-        self.confirmation.write_text('SYNTHETIC protocol fixture only: normal emphasis repetition can be retained.')
+        self.confirmation.write_text('SYNTHETIC protocol fixture only: normal emphasis repetition can be retained.', encoding="utf-8")
         self.report = make_report(self.source, 2.0, {
             k: {'status': 'executed', 'result': 'passed', 'method': 'synthetic detector fixture', 'coverage': full_coverage(2.0)}
             for k in REQUIRED_CHECKS
@@ -106,7 +106,7 @@ class ReviewStateTests(unittest.TestCase):
 
     def test_evidence_modified_or_missing_invalidates_resolution(self):
         self.resolve_alert()
-        self.confirmation.write_text('modified fixture evidence')
+        self.confirmation.write_text('modified fixture evidence', encoding="utf-8")
         self.assertTrue(any('evidence changed' in e for e in self.check()))
         self.confirmation.unlink()
         self.assertTrue(any('evidence file missing' in e for e in self.check()))
@@ -184,28 +184,28 @@ class ReviewStateTests(unittest.TestCase):
     def test_command_failed_and_malformed_objects_block(self):
         self.report['command_status'] = 'failed'
         self.assertTrue(self.check())
-        self.report_path.write_text('[]')
+        self.report_path.write_text('[]', encoding="utf-8")
         self.assertTrue(validate_review(self.report_path, self.source))
 
     def test_missing_lineage_or_changed_map_blocks_even_with_full_current_checks(self):
         lineage = self.report.pop('source_review_lineage')
         self.assertTrue(any('lineage unavailable' in e for e in self.check()))
         self.report['source_review_lineage'] = lineage
-        Path(lineage['edit_map']['path']).write_text('{}')
+        Path(lineage['edit_map']['path']).write_text('{}', encoding="utf-8")
         self.assertTrue(any('missing or changed' in e for e in self.check()))
 
     def test_source_alerts_cannot_disappear_or_be_marked_fixed_by_editing(self):
         lineage = self.report['source_review_lineage']
         upstream_path = Path(lineage['report']['path'])
-        upstream = json.loads(upstream_path.read_text())
+        upstream = json.loads(upstream_path.read_text(encoding="utf-8"))
         upstream['alerts'] = [{'id': 'source-warning', 'check_id': 'repeated_speech', 'start': .1, 'end': .3,
                               'review_required': True}]
-        upstream_path.write_text(json.dumps(upstream))
+        upstream_path.write_text(json.dumps(upstream), encoding="utf-8")
         lineage['report']['sha256'] = file_hash(upstream_path)
         mapping_path = Path(lineage['edit_map']['path'])
-        mapping = json.loads(mapping_path.read_text())
+        mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
         mapping['analysis_review'] = lineage['report']
-        mapping_path.write_text(json.dumps(mapping))
+        mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
         lineage['edit_map']['sha256'] = file_hash(mapping_path)
         self.assertTrue(any('was discarded' in e for e in self.check()))
         self.report['alerts'] = [{'id': 'mapped-warning', 'check_id': 'repeated_speech', 'start': .1, 'end': .3,
@@ -224,18 +224,18 @@ class ReviewStateTests(unittest.TestCase):
     def test_each_source_alert_mapping_portion_and_exact_deletion_boundary_required(self):
         lineage = self.report['source_review_lineage']
         upstream_path = Path(lineage['report']['path'])
-        upstream = json.loads(upstream_path.read_text())
+        upstream = json.loads(upstream_path.read_text(encoding="utf-8"))
         upstream['alerts'] = [{'id':'cross-cut', 'check_id':'repeated_speech', 'start':.2, 'end':1.8, 'review_required':True}]
         mapping_path = Path(lineage['edit_map']['path'])
-        mapping = json.loads(mapping_path.read_text())
+        mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
         mapping['kept_segments'] = [
             {'source_start':0,'source_end':.5,'output_start':0,'output_end':.5},
             {'source_start':1.5,'source_end':2,'output_start':.5,'output_end':1}]
         def bind():
-            upstream_path.write_text(json.dumps(upstream))
+            upstream_path.write_text(json.dumps(upstream), encoding="utf-8")
             lineage['report']['sha256'] = file_hash(upstream_path)
             mapping['analysis_review'] = lineage['report']
-            mapping_path.write_text(json.dumps(mapping))
+            mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
             lineage['edit_map']['sha256'] = file_hash(mapping_path)
             for alert in self.report['alerts']:
                 alert['upstream_report_sha256'] = lineage['report']['sha256']

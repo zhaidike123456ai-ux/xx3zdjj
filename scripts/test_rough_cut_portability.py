@@ -37,7 +37,8 @@ class RoughCutTests(unittest.TestCase):
             sys.executable, str(Path(__file__).with_name("run_pipeline.py")), "rough-cut",
             "--source", str(self.source), "--analysis-dir", str(self.analysis),
             "--output-dir", str(self.output), "--preset", "ultrafast", *extra,
-        ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace",
+           env=dict(os.environ,PYTHONIOENCODING="utf-8"))
 
     def test_preserves_source_fps_and_dimensions(self):
         result = self.run_cut("--confirmed-delete", "0.5:1.0:test")
@@ -49,11 +50,11 @@ class RoughCutTests(unittest.TestCase):
         self.assertAlmostEqual(float(validation["probe"]["format"]["duration"]), 1.5, delta=0.05)
         self.assertEqual(validation["full_decode"], "passed")
         self.assertEqual(validation["spec_status"], "passed")
-        clips=json.loads((self.output / "cut-listening/manifest.json").read_text())["clips"]
+        clips=json.loads((self.output / "cut-listening/manifest.json").read_text(encoding="utf-8"))["clips"]
         self.assertEqual(len(clips),3)
         self.assertTrue(all(Path(x["path"]).is_file() for x in clips))
         self.assertEqual(file_hash(self.source),
-                         json.loads((self.analysis / "analysis-manifest.json").read_text())["source_sha256"])
+                         json.loads((self.analysis / "analysis-manifest.json").read_text(encoding="utf-8"))["source_sha256"])
 
     def test_render_removes_first_burst_and_preserves_second_onset(self):
         # Synthetic acoustic regression, not a claim about natural syllables.
@@ -69,10 +70,10 @@ class RoughCutTests(unittest.TestCase):
         self.source=self.root/'opening.mp4'
         subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','color=s=64x96:r=30:d=2',
                         '-i',str(wav),'-shortest','-c:v','libx264','-pix_fmt','yuv420p','-c:a','alac',str(self.source)],check=True,capture_output=True)
-        (self.analysis/'analysis-manifest.json').write_text(json.dumps({'source_sha256':file_hash(self.source)}))
+        (self.analysis/'analysis-manifest.json').write_text(json.dumps({'source_sha256':file_hash(self.source)}), encoding="utf-8")
         result=self.run_cut('--confirmed-delete','0:1.0:synthetic labelled first-burst removal')
         self.assertEqual(result.returncode,0,result.stderr)
-        mapping=json.loads((self.output/'edit-map.json').read_text())
+        mapping=json.loads((self.output/'edit-map.json').read_text(encoding="utf-8"))
         self.assertEqual(mapping['kept_segments'][0]['source_start'],1.0)
         media=next(self.output.glob('*.mp4'))
         pcm=subprocess.run(['ffmpeg','-v','error','-i',str(media),'-vn','-ac','1','-ar',str(rate),'-f','s16le','-'],check=True,capture_output=True).stdout
@@ -87,7 +88,7 @@ class RoughCutTests(unittest.TestCase):
         # measuring only the middle of the burst would miss clipped beginnings.
         self.assertGreater(amplitude(2400,.020,.060),10000)
         self.assertLess(amplitude(1200,0,.35),500)
-        validation=json.loads((self.output/'validation.json').read_text())
+        validation=json.loads((self.output/'validation.json').read_text(encoding="utf-8"))
         self.assertEqual(validation['quality_status'],'unverified')
 
     def test_missing_decision_does_not_silently_ignore_approval(self):
@@ -114,20 +115,20 @@ class RoughCutTests(unittest.TestCase):
     def test_acoustic_evidence_is_used_and_source_bound(self):
         evidence=self.root/"acoustic.json"
         evidence.write_text(json.dumps({"source_sha256":file_hash(self.source),"status":"verified_acoustic_bounds",
-                                       "previous_word_end":.4,"failed_audio_onset":.55,"last_complete_audio_onset":1.1}))
+                                       "previous_word_end":.4,"failed_audio_onset":.55,"last_complete_audio_onset":1.1}), encoding="utf-8")
         decision=self.root/"decisions.csv"
-        with decision.open("w",newline="") as stream:
+        with decision.open("w",newline="", encoding="utf-8") as stream:
             writer=csv.DictWriter(stream,fieldnames=["candidate_id","candidate_type","delete_start","delete_end","acoustic_evidence"])
             writer.writeheader(); writer.writerow({"candidate_id":"FR1","candidate_type":"short_fragment_or_swallowed_restart",
                                                   "delete_start":.6,"delete_end":1,"acoustic_evidence":str(evidence)})
         result=self.run_cut("--decision-file",str(decision),"--approve-candidate","FR1")
         self.assertEqual(result.returncode,0,result.stderr)
-        edit=json.loads((self.output/"edit-map.json").read_text())
+        edit=json.loads((self.output/"edit-map.json").read_text(encoding="utf-8"))
         self.assertAlmostEqual(edit["boundary_evidence"][0]["resolved_start"],13/24)
 
     def test_short_restart_without_evidence_blocks(self):
         decision=self.root/"decisions.csv"
-        with decision.open("w",newline="") as stream:
+        with decision.open("w",newline="", encoding="utf-8") as stream:
             writer=csv.DictWriter(stream,fieldnames=["candidate_id","candidate_type","delete_start","delete_end"])
             writer.writeheader(); writer.writerow({"candidate_id":"FR1","candidate_type":"short_fragment_or_swallowed_restart","delete_start":.5,"delete_end":1})
         result=self.run_cut("--decision-file",str(decision),"--approve-candidate","FR1")

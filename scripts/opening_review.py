@@ -7,6 +7,7 @@ An ASR callback performs actual recognition; this module never loads a model.
 from __future__ import annotations
 
 import array
+import copy
 import hashlib
 import math
 import sys
@@ -120,7 +121,7 @@ def plan_opening_windows(duration, activity_intervals, words=None, *, window_sec
     valid_words=_words(words)
     if not activities:
         return {'status':'skipped','reason':'no sustained acoustic activity; no opening recognition claimed',
-                'effective_start':None,'windows':[],'coverage':coverage((0,0),[]),
+                'effective_start':None,'media_duration':duration,'windows':[],'coverage':coverage((0,0),[]),
                 'speech_verified':False,'asr_word_support':False}
     clusters=[]
     for interval in activities:
@@ -193,7 +194,8 @@ def plan_opening_windows(duration, activity_intervals, words=None, *, window_sec
         windows.append(dict(item,id=f'opening_{len(windows):03d}',coordinate_system='source_seconds'))
     gaps=[{'before_end':a['end'],'after_start':b['start'],'gap_seconds':float(b['start'])-float(a['end'])}
           for a,b in zip(selected['intervals'],selected['intervals'][1:])]
-    return {'status':'planned','reason':reason,'effective_start':effective,'review_start':review_start,'windows':windows,
+    return {'status':'planned','reason':reason,'effective_start':effective,'review_start':review_start,
+            'media_duration':duration,'windows':windows,
             'coverage':coverage((review_start,end),windows),'asr_word_support':support,
             'earlier_asr_anchor_used':bool(nearby_asr_anchor and review_start<effective),
             'first_asr_word':valid_words[0] if valid_words else None,'max_windows':max_windows,
@@ -203,7 +205,7 @@ def plan_opening_windows(duration, activity_intervals, words=None, *, window_sec
             'uncertainty':'Acoustic onset is an activity candidate, not proof of a particular word or a safe cut.'}
 
 
-def analyze_opening(wav_path, words=None, **options):
+def analyze_opening(wav_path, words=None, *, media_duration=None, **options):
     path=Path(wav_path)
     with wave.open(str(path),'rb') as handle:
         if (handle.getnchannels(),handle.getframerate(),handle.getsampwidth(),handle.getcomptype())!=(1,16000,2,'NONE'):
@@ -212,7 +214,14 @@ def analyze_opening(wav_path, words=None, **options):
     samples=array.array('h');samples.frombytes(pcm)
     if sys.byteorder!='little':samples.byteswap()
     acoustic=acoustic_activity(samples)
-    plan=plan_opening_windows(acoustic['duration'],acoustic['activity_intervals'],words,**options)
+    duration=acoustic['duration']
+    activities=acoustic['activity_intervals']
+    if media_duration is not None:
+        if not _finite(media_duration) or float(media_duration)<=0:raise ValueError('invalid media duration')
+        duration=min(duration,float(media_duration))
+        activities=[dict(x,end=min(x['end'],duration),duration=min(x['end'],duration)-x['start'])
+                    for x in activities if x['start']<duration]
+    plan=plan_opening_windows(duration,activities,words,**options)
     # Full frame evidence stays available from the pure analyzer; compact report
     # records opening-related frames and summaries rather than the whole file.
     onset=plan['effective_start']
@@ -220,48 +229,152 @@ def analyze_opening(wav_path, words=None, **options):
     return dict(plan,wav_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),acoustic_evidence=acoustic)
 
 
-def source_relative_words(local_words, window_start):
-    """Do not mutate local timestamps or interpolate phonemes."""
-    if not _finite(window_start) or window_start<0:raise ValueError('invalid window start')
-    result=[]
-    for word in local_words:
-        copy=dict(word)
-        if not _finite(copy['start']) or not _finite(copy['end']) or not 0<=float(copy['start'])<float(copy['end']):
-            raise ValueError('invalid local word timestamps')
-        copy['local_start']=float(copy['start']);copy['local_end']=float(copy['end'])
-        copy['start']=float(copy['start'])+window_start;copy['end']=float(copy['end'])+window_start
-        result.append(copy)
-    return result
+def source_relative_word_evidence(local_words, window_start, *, window_end=None, window_id=None):
+    """Keep all ASR evidence without inventing timestamps for malformed words.
 
-
-def execute_opening_review(plan, asr_callback=None):
-    """Call a host decoder(window_dict), returning word list or segments dict.
-
-    The host owns media extraction/model/cache. No callback means unavailable,
-    not executed. Exceptions/empty results are recorded; no candidate auto-cuts.
+    Only ``words`` have usable positive-length measured coordinates. Raw output
+    and ``timing_unverified`` are evidence for review, never cut/subtitle input.
+    A bad word makes this window incomplete, even when the other words survive.
     """
-    windows=plan.get('windows',[]);target=plan.get('coverage',{}).get('target',[0,0])
-    reports=[];completed=[]
-    if not windows:
-        return {'status':'skipped','reason':plan.get('reason','no planned windows'),'windows':[],
-                'coverage':coverage(target,[]),'human_listening':'not performed','deletion_authorized':False}
-    if asr_callback is None:
-        return {'status':'unavailable','reason':'no local ASR callback; acoustic planning only','windows':[],
-                'coverage':coverage(target,[]),'planned_coverage':plan['coverage'],'human_listening':'not performed','deletion_authorized':False}
-    for window in windows:
+    if not _finite(window_start) or float(window_start)<0:
+        raise ValueError('invalid window start')
+    start=float(window_start)
+    if window_end is not None and (not _finite(window_end) or float(window_end)<=start):
+        raise ValueError('invalid window end')
+    if not isinstance(local_words,list):
+        raise ValueError('local words must be a list')
+    raw=copy.deepcopy(local_words)
+    valid=[];invalid=[]
+    for index,word in enumerate(local_words):
+        entry=word if isinstance(word,dict) else {}
+        a,b=entry.get('start'),entry.get('end')
+        reason=None
         try:
-            decoded=asr_callback(dict(window))
-            local=[w for s in decoded.get('segments',[]) for w in s.get('words',[])] if isinstance(decoded,dict) else decoded
-            if not isinstance(local,list):raise ValueError('callback must return local word list or transcript segments')
-            words=source_relative_words(local,float(window['start']))
-            if any(w['end']>float(window['end'])+.025 for w in words):raise ValueError('local word extends beyond window')
-            reports.append(dict(window,status='executed',words=words,reason='actual callback completed; words are review evidence only'))
-            completed.append(window)
-        except Exception as error:
-            reports.append(dict(window,status='unavailable',words=[],reason=f'{type(error).__name__}: {error}'))
+            finite=a is not None and b is not None and _finite(a) and _finite(b)
+        except (TypeError,ValueError,OverflowError):
+            finite=False
+        if not isinstance(word,dict):reason='word record is not an object'
+        elif entry.get('timing_status')=='timing_unverified':reason='word was explicitly marked timing_unverified'
+        elif not finite:reason='word timestamps are missing, nonnumeric, or nonfinite'
+        elif float(a)<0:reason='word starts before the decoded window'
+        elif float(b)==float(a):reason='zero-duration word'
+        elif float(b)<float(a):reason='word end precedes its start'
+        elif window_end is not None and start+float(b)>float(window_end)+1e-8:
+            reason='word extends beyond the decoded window'
+        if reason:
+            invalid.append({'index':index,'window_id':window_id,'word':entry.get('word'),
+                'local_start':a,'local_end':b,
+                'source_start':start+float(a) if finite else None,
+                'source_end':start+float(b) if finite else None,
+                'raw_word':copy.deepcopy(word),'timing_status':'timing_unverified',
+                'reason':reason,'usable_for_cut':False,'usable_for_subtitle_timing':False})
+            continue
+        adjusted=copy.deepcopy(word)
+        adjusted.update(local_start=float(a),local_end=float(b),start=start+float(a),end=start+float(b),
+                        source_word_index=index)
+        valid.append(adjusted)
+    return {'words':valid,'raw_words':raw,'timing_unverified':invalid,
+            'status':'unavailable' if invalid else 'executed',
+            'quality_status':'review_required' if invalid else 'unverified'}
+
+
+def source_relative_words(local_words, window_start):
+    """Strict legacy API; use source_relative_word_evidence to retain partial data."""
+    evidence=source_relative_word_evidence(local_words,window_start)
+    if evidence['timing_unverified']:
+        first=evidence['timing_unverified'][0]
+        raise ValueError(f"invalid local word timestamps at index {first['index']} "
+                         f"({first['word']!r}): {first['reason']}; "
+                         f"start={first['local_start']!r}, end={first['local_end']!r}")
+    return evidence['words']
+
+
+def _decode_opening_window(window, asr_callback):
+    """Retain decoder return before validation, including on parsing failure."""
+    decoded=None
+    try:
+        decoded=asr_callback(dict(window))
+        if isinstance(decoded,dict):
+            if not isinstance(decoded.get('segments'),list):
+                raise ValueError('callback transcript must contain a segments list')
+            local=[];indices=[]
+            for segment_index,segment in enumerate(decoded['segments']):
+                if not isinstance(segment,dict) or not isinstance(segment.get('words',[]),list):
+                    raise ValueError(f'invalid words collection in segment {segment_index}')
+                for word_index,word in enumerate(segment.get('words',[])):
+                    indices.append((segment_index,word_index));local.append(word)
+        else:
+            local=decoded;indices=[]
+        evidence=source_relative_word_evidence(local,float(window['start']),
+                    window_end=float(window['end']),window_id=window.get('id'))
+        for issue in evidence['timing_unverified']:
+            if indices:
+                issue['segment_index'],issue['segment_word_index']=indices[issue['index']]
+        reasons=[f"word {issue['index']} ({issue['word']!r}): {issue['reason']}"
+                 for issue in evidence['timing_unverified']]
+        return dict(window,**evidence,raw_output=copy.deepcopy(decoded),
+            reason='; '.join(reasons) if reasons else 'actual callback completed; words are review evidence only')
+    except Exception as error:
+        return dict(window,status='unavailable',words=[],raw_words=[],timing_unverified=[],
+                    raw_output=copy.deepcopy(decoded),quality_status='review_required',
+                    error_type=type(error).__name__,reason=f'{type(error).__name__}: {error}')
+
+
+def _retry_window(window, duration):
+    # One expanded decode uses a new source interval/cache key. Expansion is
+    # bounded and never changes the original failure record or marks it fixed.
+    a,b=float(window['start']),float(window['end'])
+    start=max(0,a-.15);end=min(duration,b+.20)
+    if start==a and end==b:return None
+    return dict(window,id=str(window.get('id','opening'))+'_retry_1',
+        start=start,end=end,kind='retry_expanded_context',retry_of=window.get('id'),
+        attempt=1,cache_window=[start,end],
+        reason='one bounded expansion after incomplete decode; original evidence still requires review')
+
+
+def execute_opening_review(plan, asr_callback=None, *, max_retries=0):
+    """Decode planned windows, retain partial evidence, never imply audio passed.
+
+    ``max_retries`` is a total review budget of zero or one additional decode.
+    Retries are supplemental evidence in ``retry_windows``; original scheduled,
+    completed and failed counts are never rewritten by a successful retry.
+    ``temporal_coverage_complete`` concerns the time union of fully decoded
+    original windows; ``multiscale_complete`` requires every original window.
+    Neither status verifies speech quality or authorizes a cut.
+    """
+    if type(max_retries) is not int or max_retries not in (0,1):
+        raise ValueError('max_retries must be zero or one total additional decode')
+    windows=plan.get('windows',[]);target=plan.get('coverage',{}).get('target',[0,0])
+    reports=[];completed=[];retries=[]
+    if asr_callback is not None:
+        for window in windows:
+            report=_decode_opening_window(window,asr_callback)
+            reports.append(report)
+            if report['status']=='executed':completed.append(window)
+            elif len(retries)<max_retries:
+                duration=float(plan.get('media_duration',plan.get('acoustic_evidence',{}).get('duration',
+                    max(float(w['end']) for w in windows))))
+                retry=_retry_window(window,duration)
+                if retry is not None:retries.append(_decode_opening_window(retry,asr_callback))
+    else:
+        reports=[dict(window,status='unavailable',words=[],raw_words=[],timing_unverified=[],
+            raw_output=None,quality_status='review_required',
+            reason='no local ASR callback; acoustic planning only') for window in windows]
     covered=coverage(target,completed)
-    all_completed=len(completed)==len(windows) and covered['complete']
-    return {'status':'executed' if all_completed else 'unavailable',
-            'reason':'independent overlapping local decodes completed' if all_completed else 'one or more scheduled windows or opening regions lack completed local decoding',
-            'windows':reports,'coverage':covered,'planned_coverage':plan['coverage'],
+    failed=len(windows)-len(completed)
+    multiscale_complete=bool(windows) and failed==0
+    all_completed=multiscale_complete and covered['complete']
+    status='executed' if all_completed else ('unavailable' if windows else 'skipped')
+    if not windows:reason=plan.get('reason','no planned windows')
+    elif asr_callback is None:reason='no local ASR callback; acoustic planning only'
+    elif all_completed:reason='independent overlapping local decodes completed; listening still required'
+    else:reason='one or more scheduled windows or opening regions lack complete local decoding; retained evidence requires review'
+    return {'status':status,'reason':reason,'windows':reports,'coverage':covered,
+            'planned_coverage':plan.get('coverage',coverage(target,windows)),
+            'scheduled_windows':len(windows),'completed_windows':len(completed),'failed_windows':failed,
+            'temporal_coverage_complete':covered['complete'],'multiscale_complete':multiscale_complete,
+            'quality_status':'review_required' if failed else 'unverified',
+            'retry_limit':max_retries,'retry_windows':retries,'retried_windows':len(retries),
+            'successful_retries':sum(x['status']=='executed' for x in retries),
+            'retry_resolution':'supplemental evidence only; original failures remain unresolved',
             'human_listening':'not performed','speech_completeness':'not verified','deletion_authorized':False}

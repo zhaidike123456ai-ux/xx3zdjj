@@ -53,12 +53,12 @@ class StageGateTests(unittest.TestCase):
         self.residual_data["alerts"] = [{"id": "alert-synthetic", "check_id": "repeated_speech",
                                         "start": .2, "end": .4, "review_required": True}]
         self.residual_data["quality_status"] = "review_required"
-        self.residual_path.write_text(json.dumps(self.residual_data))
+        self.residual_path.write_text(json.dumps(self.residual_data), encoding="utf-8")
         self.data["residual_review"]["report"]["sha256"] = file_hash(self.residual_path)
         self.assertTrue(any("unresolved review_required" in e for e in self.check()))
 
     def test_changed_residual_reference_blocks(self):
-        self.residual_path.write_text(self.residual_path.read_text() + " ")
+        self.residual_path.write_text(self.residual_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
         self.assertTrue(any("report changed" in e for e in self.check()))
 
     def test_changed_media(self):

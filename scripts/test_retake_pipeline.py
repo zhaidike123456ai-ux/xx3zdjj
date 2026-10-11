@@ -113,7 +113,7 @@ class AnalysisIntegrationTests(unittest.TestCase):
         auditor.assert_called_once()
         self.assertEqual(Path(auditor.call_args.args[0]).resolve(),self.source.resolve())
         self.assertFalse(any(p.name.startswith('rough') for p in self.out.iterdir()))
-        report=json.loads((self.out/'review-report.json').read_text())
+        report=json.loads((self.out/'review-report.json').read_text(encoding="utf-8"))
         self.assertEqual(report['detection_checks']['second_full_asr']['status'],'skipped')
         self.assertEqual(report['detection_checks']['opening_overlap']['status'],'executed')
         self.assertEqual(report['command_status'],'completed')
@@ -134,7 +134,7 @@ class AnalysisIntegrationTests(unittest.TestCase):
 
     def test_zero_machine_candidate_is_not_a_quality_pass(self):
         self.analyze([word('如果',.1,.3),word('人物',.3,.5)],opening={'status':'executed','reason':'mock no candidate','coverage':{'scope':'opening_windows','start':0,'end':1},'alerts':[],'windows':[],'plan':{}})
-        report=json.loads((self.out/'review-report.json').read_text())
+        report=json.loads((self.out/'review-report.json').read_text(encoding="utf-8"))
         self.assertEqual(report['alerts'],[])
         self.assertEqual(report['command_status'],'completed')
         self.assertEqual(report['quality_status'],'unverified')
@@ -142,7 +142,7 @@ class AnalysisIntegrationTests(unittest.TestCase):
 
     def test_opening_unavailable_stays_explicit_unverified(self):
         self.analyze([word('如果',.1,.3)],opening={'status':'unavailable','reason':'decoder unavailable fixture','coverage':{},'alerts':[],'windows':[],'plan':{}})
-        report=json.loads((self.out/'review-report.json').read_text())
+        report=json.loads((self.out/'review-report.json').read_text(encoding="utf-8"))
         self.assertEqual(report['detection_checks']['opening_overlap']['status'],'unavailable')
         self.assertIn('decoder unavailable',report['detection_checks']['opening_overlap']['reason'])
         self.assertEqual(report['quality_status'],'unverified')
@@ -189,12 +189,12 @@ class AlertLineageTests(unittest.TestCase):
         report=self.root/'source-review.json'
         report.write_text(json.dumps({'source_sha256':pipeline.sha256(self.original),'alerts':[
             {'id':'upstream-one','check_id':'repeated_speech','start':.2,'end':.4,'text':'我','review_required':True},
-            {'id':'upstream-two','check_id':'repeated_speech','start':.5,'end':.7,'text':'我','review_required':True}]}))
+            {'id':'upstream-two','check_id':'repeated_speech','start':.5,'end':.7,'text':'我','review_required':True}]}), encoding="utf-8")
         # Both removed source ranges map to the exact same retained cut boundary.
         mapping={'output_sha256':pipeline.sha256(self.media),'source_sha256':pipeline.sha256(self.original),
                  'analysis_review':{'path':str(report),'sha256':pipeline.sha256(report)},
                  'kept_segments':[{'source_start':2,'source_end':3,'output_start':0,'output_end':1}]}
-        (self.root/'edit-map.json').write_text(json.dumps(mapping))
+        (self.root/'edit-map.json').write_text(json.dumps(mapping), encoding="utf-8")
         alerts,lineage=pipeline.propagate_analysis_alerts(self.media,1)
         self.assertEqual(lineage['status'],'executed')
         self.assertEqual(len(alerts),2)
@@ -204,7 +204,7 @@ class AlertLineageTests(unittest.TestCase):
         self.assertEqual(len(pipeline.unique_alerts(self.media,alerts)),2)
 
     def test_changed_output_rejects_existing_lineage(self):
-        (self.root/'edit-map.json').write_text(json.dumps({'output_sha256':'stale'}))
+        (self.root/'edit-map.json').write_text(json.dumps({'output_sha256':'stale'}), encoding="utf-8")
         with self.assertRaisesRegex(SystemExit,'another output'):
             pipeline.propagate_analysis_alerts(self.media,1)
 
@@ -215,16 +215,16 @@ class RoughCutBoundaryTests(unittest.TestCase):
         self.root=Path(self.temp.name);self.source=self.root/'source.mp4';self.source.write_bytes(b'SYNTHETIC source identity only')
         self.analysis=self.root/'analysis';self.analysis.mkdir();self.out=self.root/'cut'
         self.source_hash=pipeline.sha256(self.source)
-        (self.analysis/'analysis-manifest.json').write_text(json.dumps({'source_sha256':self.source_hash}))
+        (self.analysis/'analysis-manifest.json').write_text(json.dumps({'source_sha256':self.source_hash}), encoding="utf-8")
         self.meta={'format':{'duration':'5.0'},'streams':[{'codec_type':'video','r_frame_rate':'30/1','width':180,'height':320},{'codec_type':'audio'}]}
         self.decision=self.root/'decisions.csv';self.evidence=self.root/'bounds.json'
         self.row=dict(candidate_id='RT001',candidate_type='long_sentence_retake',delete_start='.5',delete_end='1.019',
                       program_decision='resolved_delete',acoustic_evidence=str(self.evidence))
         self.write_decision()
-        self.evidence.write_text(json.dumps(dict(source_sha256=self.source_hash,status='verified_acoustic_bounds',previous_word_end=.4,failed_audio_onset=.55,last_complete_audio_onset=1.020)))
+        self.evidence.write_text(json.dumps(dict(source_sha256=self.source_hash,status='verified_acoustic_bounds',previous_word_end=.4,failed_audio_onset=.55,last_complete_audio_onset=1.020)), encoding="utf-8")
 
     def write_decision(self):
-        with self.decision.open('w',newline='') as stream:
+        with self.decision.open('w',newline='', encoding="utf-8") as stream:
             writer=csv.DictWriter(stream,fieldnames=list(self.row));writer.writeheader();writer.writerow(self.row)
 
     def args(self):
@@ -245,7 +245,7 @@ class RoughCutBoundaryTests(unittest.TestCase):
         renderer.assert_not_called();self.assertFalse(self.out.exists())
 
     def test_acoustic_evidence_cannot_be_from_another_source(self):
-        data=json.loads(self.evidence.read_text());data['source_sha256']='other';self.evidence.write_text(json.dumps(data))
+        data=json.loads(self.evidence.read_text(encoding="utf-8"));data['source_sha256']='other';self.evidence.write_text(json.dumps(data), encoding="utf-8")
         with patch.object(pipeline,'probe',return_value=self.meta),patch.object(pipeline,'run') as renderer:
             with self.assertRaisesRegex(SystemExit,'source-bound'):
                 pipeline.rough_cut(self.args())

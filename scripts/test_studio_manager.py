@@ -31,7 +31,7 @@ class StudioTests(unittest.TestCase):
         self.assertTrue(all(str(p.relative_to(self.root)).isascii() for p in self.root.rglob("*")))
         self.assertEqual(self.source.read_bytes(), b"source unchanged")
         self.assertEqual((self.project / "01_inputs/video_01.mp4").read_bytes(), self.source.read_bytes())
-        self.assertIn("完整预览", (self.project / "00_project_info/README_zh.md").read_text())
+        self.assertIn("完整预览", (self.project / "00_project_info/README_zh.md").read_text(encoding="utf-8"))
 
     def test_reserved_and_traversal_slugs_rejected(self):
         for bad in ("con", "CON", "../other", "a:b", "a ", "中文", "a" * 49):

@@ -8,7 +8,9 @@
 - test_runtime.py：环境发现、平台分支、安装复用和失败恢复。mock下载安装不等于Windows真实安装。
 - test_retake_detection.py、test_media_quality.py：短重说/正常重复、缓存、字幕对齐阻断、局部复核和媒体合成。构造词表测试不是识别准确率。
 - test_rough_cut_portability.py：合成媒体实际删除/帧率、hash、非法删除阻断。
-- test_opening_review.py：前导静音、多尺度窗口、覆盖与不可用状态；合成波形不是人声识别准确率。
+- test_opening_review.py：前导静音、多尺度窗口、九个正常词加零时长词、原始证据保留、时间覆盖/分窗成功区别和有限重试；合成波形不是人声识别准确率。
+- test_silence_media_bounds.py：24.05 秒媒体与 24.064 秒解码填充、完全填充区、未闭合尾部静音、原测量审计与异常大时差。
+- test_analysis_to_captions.py：真实合成媒体实际分析、粗剪、残留检测和字幕 CLI；完整证据进入 SRT，缺证据/确认/来源或过期版本仍阻断。ASR 和听校确认是明确标注的模拟夹具，不冒称真人验收。
 - test_retake_pipeline.py、test_review_pipeline.py：默认策略不禁用检测、单次全片仍分窗、首尾提议边界、帧量化后字头保护、零候选仍未验证、反馈双源对照。
 - test_review_state.py：报警与版本闭环、实际证据要求、上游来源与多分片覆盖；模拟听校夹具不代表真人听过。
 - test_stage_gate.py：批准版本、证据、未解决项对后续阶段的阻断。
@@ -43,3 +45,7 @@ python -m unittest discover -s scripts -p 'test_real_opening.py' -v
 ```
 
 测试会实际执行有上限的开场短窗，要求合并短窗暴露标注重复、产生待复核候选、缺 ASR 时明确 unavailable，并核对原片 hash 不变。不会剪片或下载模型；需要安装好的 FFmpeg/FFprobe 和 faster-whisper。测试通过只证明该标注样本被发现，不能证明任意口误均被检出或成片已经完成听校。
+
+可选零时长词真实回归：在上述私有样本环境之外设置 `XX3ZDJJ_REAL_TIMING_WINDOW=START:END`，并设置已标注的 `XX3ZDJJ_REAL_TIMING_WORD`（默认“上”）。测试必须实际复现该词时间异常，保留其他正常词与完整原始输出，不能以简单放行 unavailable 当作通过；不提供窗口时明确跳过。不同模型/系统未复现该异常时会报告失败而非捏造证据。
+
+新旧测试的文本读写显式使用 UTF-8，Windows 的默认 GBK 不再决定中文夹具编码。跨平台分支与编码检查不等于 Windows 实机或真实听校已经验收。

@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+import wave
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,21 +28,26 @@ class ReviewPipelineTests(unittest.TestCase):
             {'word':'我','start':.1,'end':.25,'probability':.99},
             {'word':'发现','start':.25,'end':.5,'probability':.99}]}]}
 
+    def extract(self,source,audio):
+        with wave.open(str(audio),'wb') as stream:
+            stream.setnchannels(1);stream.setsampwidth(2);stream.setframerate(16000)
+            stream.writeframes(b'\0\0'*80000)
+
     def opening(self,source,audio,out,args,words,decoder=None):
         value={'status':'executed','reason':'synthetic opening check','coverage':{'complete':True},'alerts':[],'windows':[]}
-        (out/'opening-review.json').write_text(json.dumps(value))
+        (out/'opening-review.json').write_text(json.dumps(value), encoding="utf-8")
         return value
 
     def run_stage(self,**overrides):
         for k,v in overrides.items():setattr(self.args,k,v)
         with patch.object(pipeline,'probe',return_value={'format':{'duration':'5'}}), \
-             patch.object(pipeline,'extract_audio'),patch.object(pipeline,'OpeningDecoder',return_value=self.decode), \
+             patch.object(pipeline,'extract_audio',side_effect=self.extract),patch.object(pipeline,'OpeningDecoder',return_value=self.decode), \
              patch.object(pipeline,'opening_audit',side_effect=self.opening) as opening, \
              patch.object(pipeline,'run',return_value=SimpleNamespace(stderr='',stdout='')), \
              patch.object(pipeline,'propagate_analysis_alerts',return_value=([],{'status':'unavailable','reason':'synthetic no lineage'})), \
              redirect_stdout(io.StringIO()):
             result=pipeline.review_stage(self.args)
-        return result,json.loads((self.output/'review-report.json').read_text()),opening
+        return result,json.loads((self.output/'review-report.json').read_text(encoding="utf-8")),opening
 
     def test_no_asr_candidates_is_unverified_not_quality_passed(self):
         result,report,opening=self.run_stage()
@@ -69,10 +75,53 @@ class ReviewPipelineTests(unittest.TestCase):
         original=self.root/'original.mp4'; original.write_bytes(b'synthetic original')
         _,report,_=self.run_stage(stage='local-review',window=['2:2.6'],feedback='开头重复',
             reference_source=original,reference_window=['1:1.6'])
-        other=json.loads(Path(report['reference_review']['path']).read_text())
+        other=json.loads(Path(report['reference_review']['path']).read_text(encoding="utf-8"))
         self.assertEqual(other['source_sha256'],pipeline.sha256(original))
         self.assertEqual(report['source_sha256'],pipeline.sha256(self.source))
         self.assertTrue(any(x['kind']=='user_feedback' and x['review_required'] for x in report['alerts']))
+
+    def test_zero_duration_word_preserves_nine_normal_words_and_raw_output(self):
+        words=[{'word':char,'start':i*.2,'end':i*.2+.15} for i,char in enumerate('不知道这个玩法图片')]
+        self.assertEqual(len(words),9)
+        words.append({'word':'上','start':2.48,'end':2.48})
+        self.decode=lambda _: {'segments':[{'start':0,'end':2.48,'text':'不知道这个玩法图片上','words':words}]}
+        _,report,_=self.run_stage()
+        window=report['windows'][0]
+        self.assertEqual(len(window['words']),9)
+        self.assertEqual(len(window['raw_output']['segments'][0]['words']),10)
+        issue=window['timing_unverified'][0]
+        self.assertEqual((issue['word'],issue['index'],issue['local_start'],issue['local_end']),('上',9,2.48,2.48))
+        self.assertEqual(issue['timing_status'],'timing_unverified')
+        self.assertFalse(issue['usable_for_subtitle_timing'])
+        self.assertEqual(window['status'],'unavailable')
+        self.assertEqual(report['quality_status'],'review_required')
+        warning=next(x for x in report['alerts'] if x.get('evidence',{}).get('timing_status')=='timing_unverified')
+        self.assertEqual((warning['start'],warning['end']),(0.,5.))
+        self.assertEqual(warning['scope_type'],'review_window_not_word_boundary')
+
+    def test_padding_is_clamped_in_public_residual_path_and_raw_measurement_survives(self):
+        def padded(source,audio):
+            with wave.open(str(audio),'wb') as stream:
+                stream.setnchannels(1);stream.setsampwidth(2);stream.setframerate(16000)
+                stream.writeframes(b'\0\0'*int(24.064*16000))
+        self.args.stage='residual-check'
+        log='silence_start: 23.613437\nsilence_end: 24.064 | silence_duration: 0.450563'
+        with patch.object(pipeline,'probe',return_value={'format':{'duration':'24.05'}}), \
+             patch.object(pipeline,'extract_audio',side_effect=padded),patch.object(pipeline,'OpeningDecoder',return_value=self.decode), \
+             patch.object(pipeline,'opening_audit',side_effect=self.opening), \
+             patch.object(pipeline,'run',return_value=SimpleNamespace(stderr=log,stdout='')), \
+             patch.object(pipeline,'propagate_analysis_alerts',return_value=([],{'status':'unavailable','reason':'synthetic no lineage'})),redirect_stdout(io.StringIO()):
+            self.assertEqual(pipeline.review_stage(self.args),0)
+        report=json.loads((self.output/'review-report.json').read_text(encoding='utf-8'))
+        pause=next(x for x in report['alerts'] if x['kind']=='pause_review')
+        self.assertEqual((pause['start'],pause['end']),(23.613437,24.05))
+        self.assertTrue(pause['review_required'])
+        self.assertTrue(all(0<=x['start']<x['end']<=24.05 for x in report['alerts']))
+        audit=json.loads((self.output/'silence-measurements.json').read_text(encoding='utf-8'))
+        raw=audit['passes']['residual']['measurements'][0]
+        self.assertEqual(raw['raw_end'],24.064)
+        self.assertAlmostEqual(raw['end_adjustment_seconds'],-.014)
+        self.assertEqual(audit['duration_comparison']['status'],'within_tolerance')
 
     def test_failed_full_decode_does_not_claim_full_detection(self):
         self.decode=lambda _: (_ for _ in ()).throw(RuntimeError('synthetic decoder failure'))

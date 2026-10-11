@@ -1,5 +1,7 @@
 """Synthetic opening-review regression; no model or private media required."""
 import array
+import copy
+import json
 import math
 import tempfile
 import unittest
@@ -8,7 +10,7 @@ from pathlib import Path
 
 from opening_review import (acoustic_activity, analyze_opening, coverage,
                             execute_opening_review, plan_opening_windows,
-                            source_relative_words)
+                            source_relative_word_evidence, source_relative_words)
 
 
 def pcm(duration, bursts):
@@ -119,6 +121,121 @@ class OpeningReviewTests(unittest.TestCase):
         report=execute_opening_review(plan,callback)
         self.assertTrue(report['coverage']['complete'])
         self.assertEqual(report['status'],'unavailable')
+        self.assertTrue(report['temporal_coverage_complete'])
+        self.assertFalse(report['multiscale_complete'])
+        self.assertEqual(report['failed_windows'],1)
+        self.assertEqual(report['completed_windows'],report['scheduled_windows']-1)
+        self.assertEqual(report['quality_status'],'review_required')
+
+    def test_exact_eight_window_union_coverage_does_not_hide_one_failed_scale(self):
+        windows=[{'id':f'window_{index}','start':10.,'end':12.5,'kind':'overlapping_context'}
+                 for index in range(8)]
+        windows[0].update(start=11.1,end=11.6,kind='isolated_first_activity')
+        plan={'windows':windows,'coverage':coverage((10.,12.5),windows),'media_duration':15.}
+        def callback(window):
+            if window['id']=='window_0':raise RuntimeError('fixture failed scale')
+            return [{'word':'我','start':.1,'end':.2}]
+        result=execute_opening_review(plan,callback)
+        self.assertEqual((result['scheduled_windows'],result['completed_windows'],result['failed_windows']),
+                         (8,7,1))
+        self.assertTrue(result['temporal_coverage_complete'])
+        self.assertFalse(result['multiscale_complete'])
+        self.assertEqual(result['status'],'unavailable')
+        self.assertEqual(result['quality_status'],'review_required')
+
+    def test_nine_valid_words_survive_tenth_zero_duration_word(self):
+        words=[{'word':character,'start':.2*index,'end':.2*index+.1,'probability':.9}
+               for index,character in enumerate('不知道這個玩法只要')]
+        words.append({'word':'上','start':2.48,'end':2.48,'probability':.7})
+        before=copy.deepcopy(words)
+        result=source_relative_word_evidence(words,13.23,window_end=15.73,window_id='zero_tail')
+        self.assertEqual(words,before,'validation must not mutate decoder output')
+        self.assertEqual(result['raw_words'],before)
+        self.assertEqual(len(result['words']),9)
+        self.assertEqual(len(result['timing_unverified']),1)
+        issue=result['timing_unverified'][0]
+        self.assertEqual((issue['window_id'],issue['index'],issue['word']),('zero_tail',9,'上'))
+        self.assertEqual((issue['local_start'],issue['local_end']),(2.48,2.48))
+        self.assertAlmostEqual(issue['source_start'],15.71)
+        self.assertEqual(issue['source_start'],issue['source_end'],'zero span must not receive invented duration')
+        self.assertFalse(issue['usable_for_cut']);self.assertFalse(issue['usable_for_subtitle_timing'])
+        self.assertEqual(result['status'],'unavailable')
+        self.assertEqual(result['quality_status'],'review_required')
+        self.assertTrue(all(w['source_word_index']<9 for w in result['words']))
+
+    def test_zero_duration_window_keeps_full_transcript_and_specific_indices(self):
+        decoded={'language':'zh','segments':[{'text':'不知道這個玩法只要在圖片上',
+                 'words':[{'word':'不知道','start':.1,'end':.8},
+                          {'word':'上','start':2.48,'end':2.48}]}]}
+        window={'id':'affected_window','start':13.23,'end':15.73,'kind':'overlapping_context'}
+        plan={'windows':[window],'coverage':coverage((13.23,15.73),[window]),'media_duration':20.}
+        result=execute_opening_review(plan,lambda window:decoded)
+        row=result['windows'][0]
+        self.assertEqual(row['raw_output'],decoded)
+        self.assertEqual(len(row['words']),1)
+        issue=row['timing_unverified'][0]
+        self.assertEqual((issue['segment_index'],issue['segment_word_index']),(0,1))
+        self.assertIn('word 1',row['reason']);self.assertIn('上',row['reason'])
+        self.assertEqual(result['quality_status'],'review_required')
+        self.assertFalse(result['multiscale_complete'])
+
+    def test_malformed_decoder_output_retained_and_not_relabelled_as_timing_only(self):
+        malformed={'segments':'not-a-list','text':'我我发现'}
+        plan=plan_opening_windows(5,[{'start':1,'end':2}])
+        report=execute_opening_review(plan,lambda w:malformed)
+        self.assertEqual(report['status'],'unavailable')
+        self.assertEqual(report['quality_status'],'review_required')
+        for row in report['windows']:
+            self.assertEqual(row['raw_output'],malformed)
+            self.assertEqual(row['error_type'],'ValueError')
+            self.assertFalse(row['timing_unverified'])
+        self.assertFalse(report['temporal_coverage_complete'])
+
+    def test_one_retry_has_new_interval_and_original_failure_is_not_erased(self):
+        plan=plan_opening_windows(5,[{'start':1,'end':2}])
+        calls=[]
+        first_id=plan['windows'][0]['id']
+        def callback(window):
+            calls.append(copy.deepcopy(window))
+            if window['id']==first_id:return [{'word':'我','start':.2,'end':.2}]
+            return [{'word':'我','start':.2,'end':.4}]
+        result=execute_opening_review(plan,callback,max_retries=1)
+        self.assertEqual(len(calls),len(plan['windows'])+1)
+        self.assertEqual(result['retried_windows'],1)
+        self.assertEqual(result['successful_retries'],1)
+        first=result['windows'][0];retry=result['retry_windows'][0]
+        self.assertEqual(first['status'],'unavailable')
+        self.assertEqual(retry['status'],'executed')
+        self.assertEqual(retry['retry_of'],first_id)
+        self.assertNotEqual((retry['start'],retry['end']),(first['start'],first['end']))
+        self.assertEqual(retry['cache_window'],[retry['start'],retry['end']])
+        self.assertGreaterEqual(retry['start'],0);self.assertLessEqual(retry['end'],plan['media_duration'])
+        self.assertEqual(result['failed_windows'],1)
+        self.assertFalse(result['multiscale_complete'])
+        self.assertEqual(result['quality_status'],'review_required')
+        self.assertTrue(first['timing_unverified'])
+
+    def test_retry_is_total_budget_and_disabled_by_default(self):
+        plan=plan_opening_windows(15,[{'start':11.1,'end':11.2},{'start':11.5,'end':11.8}])
+        def fail(window):raise RuntimeError('decoder fixture failure')
+        self.assertEqual(execute_opening_review(plan,fail)['retried_windows'],0)
+        result=execute_opening_review(plan,fail,max_retries=1)
+        self.assertEqual(result['retried_windows'],1)
+        self.assertEqual(result['failed_windows'],result['scheduled_windows'])
+        self.assertEqual(result['successful_retries'],0)
+        for invalid in (-1,2,True,1.0):
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                execute_opening_review(plan,fail,max_retries=invalid)
+
+    def test_chinese_word_evidence_utf8_roundtrip(self):
+        words=[{'word':'正常词','start':.1,'end':.3},{'word':'上','start':.4,'end':.4}]
+        evidence=source_relative_word_evidence(words,1,window_end=2,window_id='utf8')
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'word_evidence.json'
+            path.write_text(json.dumps(evidence,ensure_ascii=False,allow_nan=False),encoding='utf-8')
+            restored=json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(restored['words'][0]['word'],'正常词')
+        self.assertEqual(restored['timing_unverified'][0]['word'],'上')
 
     def test_local_words_not_mutated_and_invalid_global_results_rejected(self):
         words=[{'word':'我','start':.1,'end':.2}]
@@ -146,6 +263,20 @@ class OpeningReviewTests(unittest.TestCase):
             self.assertIn('activity_threshold_dbfs',report['acoustic_evidence'])
             self.assertTrue(report['acoustic_evidence']['frames'])
             self.assertFalse(report['acoustic_evidence']['speech_verified'])
+
+    def test_padded_wav_planning_uses_media_bounds_preserves_raw_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'padded_fixture.wav'
+            with wave.open(str(path),'wb') as out:
+                out.setnchannels(1);out.setsampwidth(2);out.setframerate(16000)
+                out.writeframes(pcm(24.064,[(23.98,24.064)]).tobytes())
+            report=analyze_opening(path,media_duration=24.05)
+            self.assertEqual(report['media_duration'],24.05)
+            self.assertEqual(report['acoustic_evidence']['duration'],24.064)
+            self.assertTrue(report['windows'])
+            self.assertTrue(all(0<=w['start']<w['end']<=24.05 for w in report['windows']))
+            self.assertTrue(all(x['end']<=24.05 for x in report['opening_activity']))
+            self.assertTrue(report['coverage']['complete'])
 
     def test_invalid_window_parameters_block(self):
         with self.assertRaises(ValueError):plan_opening_windows(10,[{'start':1,'end':2}],window_seconds=2,hop_seconds=2)

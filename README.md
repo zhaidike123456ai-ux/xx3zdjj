@@ -139,13 +139,13 @@ talking_head_studio/
 
 剪映版本可能影响兼容性。静态检查通过不等于目标电脑已完整打开、可编辑、重开和导出通过。详见 [剪映适配](references/jianying.md) 与 [验收说明](references/testing.md)。
 
-## v2.1.0：重说检测与验收修复
+## v2.1.1：修复测量边界与分窗异常
 
-这版修改了媒体处理脚本：默认不自动删重说时也会检测；在人声实际开头执行多尺度分窗，避免长前导空白和全片 ASR 合并单字导致漏检。每项检查标明实际执行、跳过或不可用，未处理警报会阻止进入字幕阶段。详见 [检测与警报处理](references/speech-review.md)。
+静音时间统一转换到合法媒体范围，保留原始测量和裁剪差值；解码音频与媒体时长异常偏差会单独提示。零时长词不再导致整窗正常词丢失，完整原始输出与异常词均保留；时间覆盖、多尺度完成和质量状态分开记录。不会通过降低门禁让流程继续。详见 [检测与警报处理](references/speech-review.md)。
 
-本次在 macOS ARM64 完成 147 项测试（包含合成媒体与已标注真实开场回归）；真实样本的长窗仍省略重复，新增合并短窗识别出“我我发现”。这些结果不等于任意口误都能检出，也不是 Windows 实机验收。
+本次用真实原片复现了“上”的零时长，保留了另外 9 个正常词；原片 hash 未改变。新增真实合成媒体的分析→粗剪→残留复核→字幕入口测试，覆盖证据齐备生成 SRT，以及缺证据、缺确认和旧版本仍阻断。具体平台、数量与结果见 [发布说明](https://github.com/zhaidike123456ai-ux/xx3zdjj/releases/tag/v2.1.1)。Windows 文本夹具明确 UTF-8，尚未宣称 Windows 实机验收。
 
-旧版报告需要重新分析并复核，不能直接沿用“零问题”。更新 Skill 不会自动修复已生成的视频；正常叠词和强调仍需原音判断。下载包不包含私人测试素材。
+v2.1.0 的默认重说检测、有效开场分窗、警报传递与阶段确认继续保留。更新后重新生成受影响的检测报告和相应证据引用，不能手工把旧警报改成通过；无需因为修复测量坐标而重剪已确认的媒体。Skill 更新不会自动修改已有视频，下载包不包含私人素材。
 
 ## 开发与测试
 
@@ -155,7 +155,7 @@ v2.0.0 发布前在 macOS ARM64 完成 73 项单元/合成媒体回归，另有�
 
 ```bash
 cd scripts
-python -B -S -m unittest test_runtime test_studio_manager test_stage_gate test_review_state test_opening_review test_retake_pipeline test_retake_detection test_jianying_adapter test_media_quality.TextQualityTests
+python -B -S -m unittest test_runtime test_studio_manager test_stage_gate test_review_state test_opening_review test_silence_media_bounds test_retake_pipeline test_review_pipeline test_retake_detection test_jianying_adapter test_media_quality.TextQualityTests
 python -B -S test_retake_detection.py
 ```
 
