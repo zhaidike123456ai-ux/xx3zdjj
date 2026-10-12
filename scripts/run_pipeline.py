@@ -822,7 +822,7 @@ def rough_cut(args: argparse.Namespace) -> int:
     for i,value in enumerate(args.confirmed_delete,1):
         parts=value.split(":",2)
         if len(parts)<2: raise SystemExit("--confirmed-delete must be START:END[:REASON]")
-        start,end=float(parts[0]),float(parts[1]); reason=parts[2] if len(parts)>2 else "user-confirmed deletion"
+        start,end=float(parts[0]),float(parts[1]); reason=parts[2] if len(parts)>2 else ("AI-reviewed deletion under full_auto authorization" if getattr(args,'workflow_mode','semi_auto')=='full_auto' else "user-confirmed deletion")
         if not 0<=start<end<=duration+0.05: raise SystemExit(f"invalid delete range: {value}")
         deletes.append((start,min(end,duration),reason))
     deletes=sorted(deletes)
@@ -857,13 +857,16 @@ def rough_cut(args: argparse.Namespace) -> int:
     for start,end in kept:
         mapped.append({"source_start":round(start,6),"source_end":round(end,6),"output_start":round(out_cursor,6),"output_end":round(out_cursor+end-start,6)})
         out_cursor += end-start
-    delete_rows=[{"id":f"D{i:03d}","source_start":f"{a:.6f}","source_end":f"{b:.6f}","duration":f"{b-a:.6f}","reason":reason,"authorization":"explicit current-stage rough-cut authorization"} for i,(a,b,reason) in enumerate(deletes,1)]
+    authorization_label=('full_auto run authorization with AI-reviewed execution' if getattr(args,'workflow_mode','semi_auto')=='full_auto' else 'explicit current-stage rough-cut authorization')
+    delete_rows=[{"id":f"D{i:03d}","source_start":f"{a:.6f}","source_end":f"{b:.6f}","duration":f"{b-a:.6f}","reason":reason,"authorization":authorization_label} for i,(a,b,reason) in enumerate(deletes,1)]
     write_csv(out/"deleted-ranges.csv",delete_rows,["id","source_start","source_end","duration","reason","authorization"])
     analysis_ref=analysis/'review-report.json'
     source_review=({'path':str(analysis_ref),'sha256':sha256(analysis_ref),'source_sha256':source_hash}
                    if analysis_ref.is_file() else None)
     edit_map={"output_sha256":sha256(media),"analysis_review":source_review,"source":str(source),"source_sha256":source_hash,"speed":1.0,"deleted_source_ranges":delete_rows,"kept_segments":mapped,"planned_output_duration":round(out_cursor,6),
               "frame_rate":output_fps,"boundary_evidence":boundary_evidence,"coordinate_precision":"frame-quantized source trims; audio follows same boundaries"}
+    if getattr(args,'decision_report',None):
+        edit_map['decision_review']={'path':str(args.decision_report.resolve()),'sha256':sha256(args.decision_report),'mode':getattr(args,'workflow_mode','semi_auto')}
     (out/"edit-map.json").write_text(json.dumps(edit_map,ensure_ascii=False,indent=2),encoding="utf-8")
     validation=media_validation(media,meta,output_fps,expected_duration=out_cursor)
     validation.update({"source_hash_match":True,"speed":1.0,"cuts":len(deletes),"command_status":"completed","quality_status":"unverified","residual_check":"not performed; run residual-check on this exact media"})
@@ -1106,6 +1109,73 @@ def preview_stage(args: argparse.Namespace) -> int:
     return 0 if validation["spec_status"]=="passed" else 2
 
 
+def execution_settings(args, report_path=None):
+    """Resolve the real project mode; report fields cannot override a supplied project."""
+    config_path=getattr(args,'project_config',None)
+    if config_path:
+        return json.loads(Path(config_path).expanduser().resolve().read_text(encoding='utf-8-sig'))
+    if report_path:
+        report_path=Path(report_path).resolve()
+        report=json.loads(report_path.read_text(encoding='utf-8-sig'))
+        ref=report.get('workflow',{}).get('settings',{})
+        if ref.get('path'):
+            return json.loads((report_path.parent/ref['path']).read_text(encoding='utf-8-sig'))
+    return {}
+
+
+def automatic_execution_errors(args, config, report_path=None):
+    """Bind the authorized choices and reviewed deletion plan to the actual command."""
+    flow=config.get('workflow',{})
+    mode=flow.get('mode','semi_auto')
+    if mode not in ('semi_auto','full_auto'):
+        return ['choose full_auto or semi_auto before producing media']
+    if flow and flow.get('state')!='active':
+        return ['workflow is not active; record the current mode/authorization before resuming']
+    if mode!='full_auto':return []
+    if not report_path:return ['full_auto requires a version-bound AI review report']
+    report_path=Path(report_path).resolve()
+    report=json.loads(report_path.read_text(encoding='utf-8-sig'))
+    errors=[]
+    # User-selected stable render settings stay bound; per-source framing and
+    # paths may be derived by the agent when not fixed in those settings.
+    fixed=config.get('pipeline',{}).get(args.stage,{})
+    non_settings={'source','output','output_dir','output_name','analysis_dir','approval_report','decision_report',
+                  'decision_file','confirmed_delete','approve_candidate','project_config','overwrite'}
+    for key in fixed:
+        if key not in non_settings and hasattr(args,key):
+            actual=getattr(args,key);expected=fixed[key]
+            if isinstance(actual,Path):
+                equal=expected is not None and actual.expanduser().resolve()==Path(expected).expanduser().resolve()
+            else:equal=actual==expected
+            if not equal:errors.append('full_auto command differs from authorized setting: '+key)
+    if args.stage=='preview' and config.get('pipeline',{}).get('captions',{}).get('font_file'):
+        if args.font_file.expanduser().resolve()!=Path(config['pipeline']['captions']['font_file']).expanduser().resolve():
+            errors.append('preview font differs from the authorized caption font')
+    if args.stage=='rough-cut':
+        actual={'fps':args.fps,'confirmed_delete':list(args.confirmed_delete),'approve_candidate':list(args.approve_candidate),
+                'decision_file_sha256':sha256(args.decision_file) if args.decision_file else None}
+        if report.get('execution')!=actual:
+            errors.append('rough-cut execution differs from the AI-reviewed deletion plan')
+    return errors
+
+
+
+def decision_review_inputs(args):
+    """Hash the decision table and selected acoustic records, not only its path."""
+    inputs={'source':args.source}
+    if args.decision_file:
+        decision=Path(args.decision_file).expanduser().resolve()
+        inputs['decisions']=decision
+        with decision.open(encoding='utf-8-sig',newline='') as stream:
+            rows=list(csv.DictReader(stream))
+        selected=set(args.approve_candidate)
+        for index,row in enumerate(rows):
+            if row.get('candidate_id') in selected and row.get('acoustic_evidence'):
+                evidence=Path(row['acoustic_evidence']).expanduser()
+                inputs[f'acoustic_{index:04d}']=evidence if evidence.is_absolute() else decision.parent/evidence
+    return inputs
+
+
 def main() -> int:
     raw=sys.argv[1:]
     if "jianying-project" in raw:
@@ -1131,12 +1201,13 @@ def main() -> int:
     r.add_argument("--output-dir",required=True,type=Path); r.add_argument("--output-name",default="rough_cut_no_captions.mp4")
     r.add_argument("--confirmed-delete",action="append",default=[],help="START:END[:REASON]; repeatable")
     r.add_argument("--decision-file",type=Path,help="structured deletion-decisions.csv from analyze")
+    r.add_argument("--decision-report",type=Path,help="analysis gate and exact reviewed execution; required in full_auto")
     r.add_argument("--approve-candidate",action="append",default=[],help="candidate id explicitly authorized for execution; repeatable")
     r.add_argument("--fps",default=None,help="default: preserve source frame rate"); r.add_argument("--crf",type=int,default=18); r.add_argument("--preset",default="medium")
     r.add_argument("--overwrite",action="store_true")
     c=sub.add_parser("captions",help="align an approved script to the actual edited audio")
     c.add_argument("--source",required=True,type=Path); c.add_argument("--script",required=True,type=Path); c.add_argument("--output-dir",required=True,type=Path)
-    c.add_argument("--approval-report",required=True,type=Path,help="passed rough-cut checks and user approval bound to this source")
+    c.add_argument("--approval-report",required=True,type=Path,help="version-bound rough-cut checks plus semi_auto user approval or full_auto authorization/AI review")
     c.add_argument("--model",default=os.environ.get("XX3ZDJJ_MODEL_PATH","medium")); c.add_argument("--cpu-threads",type=int,default=4); c.add_argument("--max-chars",type=int,default=11)
     c.add_argument("--font-name",required=True); c.add_argument("--font-file",required=True,type=Path); c.add_argument("--font-size",type=int,default=86)
     c.add_argument("--pos-x",type=int,default=540); c.add_argument("--pos-y",type=int,default=1075); c.add_argument("--style-status",default="provisional")
@@ -1148,7 +1219,7 @@ def main() -> int:
     p=sub.add_parser("preview",help="render an authorized caption and person-mask preview")
     p.add_argument("--source",required=True,type=Path); p.add_argument("--background",required=True,type=Path)
     p.add_argument("--ass",required=True,type=Path); p.add_argument("--font-file",required=True,type=Path)
-    p.add_argument("--approval-report",required=True,type=Path,help="passed caption checks and user approval bound to source and ASS")
+    p.add_argument("--approval-report",required=True,type=Path,help="version-bound caption checks plus semi_auto user approval or full_auto authorization/AI review")
     p.add_argument("--output",required=True,type=Path); p.add_argument("--mask-shape",choices=("circle","rounded_square"),required=True)
     p.add_argument("--canvas-width",type=int,default=1080); p.add_argument("--canvas-height",type=int,default=1920)
     p.add_argument("--mask-center-x",type=int,default=540); p.add_argument("--mask-center-y",type=int,default=1470)
@@ -1177,7 +1248,7 @@ def main() -> int:
         settings=config.get("pipeline",{}).get(args.stage,{})
         parser=sub.choices[args.stage]
         explicit={x.split("=",1)[0] for x in raw if x.startswith("--")}
-        excluded={"project_config","approval_report","confirmed_delete","approve_candidate","overwrite","decision_file","allow_long_lines"}
+        excluded={"project_config","approval_report","decision_report","confirmed_delete","approve_candidate","overwrite","decision_file","allow_long_lines"}
         for action in parser._actions:
             if action.required or action.dest in excluded or action.dest not in settings: continue
             if any(flag in explicit for flag in action.option_strings): continue
@@ -1185,13 +1256,26 @@ def main() -> int:
             if action.choices and value not in action.choices: raise SystemExit(f"invalid project-config value: {action.dest}")
             if action.type is not None and value is not None: value=action.type(value)
             setattr(args,action.dest,value)
+    if args.stage in ('rough-cut','captions','preview'):
+        gate_path=getattr(args,'decision_report',None) if args.stage=='rough-cut' else args.approval_report
+        try:
+            config=execution_settings(args,gate_path)
+            errors=automatic_execution_errors(args,config,gate_path)
+            args.workflow_mode=config.get('workflow',{}).get('mode','semi_auto')
+            if args.stage=='rough-cut' and gate_path:
+                plan_inputs=decision_review_inputs(args) if args.workflow_mode=='full_auto' else {'source':args.source}
+                errors.extend(validate_report(gate_path,'analysis',plan_inputs,project_config=args.project_config))
+        except (OSError,ValueError,TypeError,AttributeError) as exc:
+            errors=['invalid workflow execution record: '+str(exc)]
+        if errors:
+            print(json.dumps({'status':'blocked','stage':args.stage,'errors':errors},ensure_ascii=False));return 2
     if args.stage in ("captions", "preview"):
         inputs = {"source": args.source}
         if args.stage == "preview":
             inputs["ass"] = args.ass
         errors = validate_report(args.approval_report,
                                  "rough-cut" if args.stage == "captions" else "captions",
-                                 inputs)
+                                 inputs,project_config=args.project_config)
         if errors:
             print(json.dumps({"status": "blocked", "stage": args.stage,
                               "errors": errors}, ensure_ascii=False))

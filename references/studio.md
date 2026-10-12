@@ -12,11 +12,15 @@
 
 `set --project PROJECT --key pipeline.preview.mask_shape --value '"circle"' --evidence 用户本次选择`记录本次设置。使用工具结构参数或正确shell引用传JSON值，不能拼接未转义用户文本。动效键为background_motion（static/right/left）和background_speed（px/s）；未确认动态时保持静态。
 
+新项目的 workflow 为 unselected/pending，先选择模式再制作；旧无模式项目兼容半自动。全自动一次授权、配置变更失效与暂停恢复见 [模式协议](workflow-modes.md#脚本与报告协议)。
+
 ## 产物与确认
 
-`register-artifact --project PROJECT --kind rough_cut --file 本项目内完整预览`登记。后续产物给`--depends-on ARTIFACT_ID`绑定批准上游；kind有analysis、rough_cut、captions、preview、native_project。工程登记生成清单文件而非整个目录。
+`register-artifact --project PROJECT --kind rough_cut --file 本项目内完整预览`登记。后续产物给`--depends-on ARTIFACT_ID`绑定上游；半自动要求 approved，全自动也接受当前有效 ai_reviewed；kind有analysis、rough_cut、captions、preview、native_project。工程登记生成清单文件而非整个目录。
 
 `approve --project PROJECT --artifact-id ID --evidence 用户真实确认摘要`保存当前hash，仅记录用户确认，不自动声称声音或UI检查完成。阶段报告仍按stage-gates.md保存真实证据。
+
+全自动使用 `review-artifact --project PROJECT --artifact-id ID --report REPORT --inputs-file INPUTS_JSON` 记录实际 AI 检查。报告经阶段门禁验证，inputs 文件将输入键映射到绝对路径，必须包含登记产物本身；不写用户 approval。native_project 使用 jianying-basic 并执行实际静态验证，ai_reviewed 状态不表示成功导入剪映。
 
 `status --project PROJECT`重新核对原片/工作副本、产物hash、对应阶段设置和上游批准。原片丢失或内容改变时，旧批准全部失效并阻止登记/批准；需恢复原文件或为新素材建立新项目。改变字幕使其下游旧确认失效；只改字幕样式不影响粗剪。新版本用新文件和新artifact，旧版保留。
 

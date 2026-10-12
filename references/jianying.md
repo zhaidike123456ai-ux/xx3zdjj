@@ -57,11 +57,11 @@ python scripts/jianying_adapter.py snapshot --project ONE_SAVED_DRAFT --output P
 
 ## 版本和批准闸门
 
-build 的 preview 报告沿用 stage_gate 格式：M1–M4 有方法及存在的证据，blocking_counts 三项严格为 0，用户批准有具体版本的原始消息、时间、证据。artifacts 必须包含 `source`、`ass`（即 captions 文件，无论 ASS/SRT）、`preview`、`background`、`timeline` 五项真实 SHA-256。改变任一内容或布局参数会阻止构建，不能自动补写批准。证据在候选里冻结，同时保留原始批准 JSON 字节和哈希。
+build 的 preview 报告沿用 stage_gate 格式：M1–M4 有方法及存在的证据，blocking_counts 三项严格为 0。半自动需要具体版本的用户原始消息、时间与证据；全自动需要有效 workflow 授权及当前版本 ai_review，不填 user_approval，build 应传 --project-config。artifacts 必须包含 `source`、`ass`（即 captions 文件，无论 ASS/SRT）、`preview`、`background`、`timeline` 五项真实 SHA-256。改变任一内容或布局参数会阻止构建，不能自动补写批准。证据在候选里冻结，同时保留原始批准 JSON 字节和哈希。
 
 validate 的 `STATIC_VALIDATED_NATIVE_UI_PENDING` 仅说明文件哈希、素材登记、引用、唯一 ID、原生字幕时序、圆形配置和全长切段结构一致。不是 UI 渲染、听感、字体、保存重开或原生导出通过。
 
-以下工程闸门 `stage: jianying-project` 用于记录用户选择后的完整原生验收，不是交付基础检查通过工程的前置条件：
+以下历史高级接口 `stage: jianying-project` 仅保留给用户另行明确要求完整原生验证的调用；两种模式默认不执行、不主动询问，不作为正常交付前置条件：
 
 - J1：完整工程与批准版的全长、帧数、字幕／切段覆盖和素材版本对应；5 秒 pilot 不得代替。
 - J2：本机 App 实际打开全部时间线，字幕、每个蒙版、切点、独立背景能编辑；在验收副本上做修改，不改变用户交付稿。
@@ -70,13 +70,13 @@ validate 的 `STATIC_VALIDATED_NATIVE_UI_PENDING` 仅说明文件哈希、素材
 
 报告另需 `project_kind: full`、`native_verification` 中 `opened_full/editability/saved_reopened/native_export` 都为 true，`os/app_version` 为实测字符串，并提供项目文件、manifest、原生导出的真实版本哈希与证据。仅记录已实际完成的步骤。未完成项保持 unverified；validate 不替用户批准。保存后 draft JSON 可能变成密文，静态 validate 不解析密文，此时保留快照并用独立 stage_gate 验证实际验收报告。
 
-## 基础检查与可选深度验收
+## 基础检查与导入即交付
 
 工程交付默认只执行一次基础完整性检查，复用 build/install 对同版本已完成的校验，不再重复整套 validate。核对工程与素材文件存在、引用正确、全长/主要轨道/字幕与批准版对应；独立审查者读取实际工程和已有报告，避免重复哈希扫描、渲染或全量转写。若缺少静态报告，调用一次 `validate`，不传 `--native-report`。基础失败项先修，只复查受影响范围；没有新问题或版本变化就停止检查。
 
-基础通过后立即给实际工程路径、导入方式和检查范围，可表述为“工程已生成，基础检查通过；剪映内可编辑性、保存重开和原生导出未验证”。`STATIC_VALIDATED_NATIVE_UI_PENDING` 可作为基础交付状态，不必为了消除 pending 而自动启动应用内检查，也不能冒称完整原生验收通过。给出工程后只问一次是否需要深度验收；已有本次选择直接采用，未回答或选择不需要时不执行、不扣住文件、不反复追问。
+全自动与半自动统一在成功导入剪映后交付：基础检查完成，使用本机实际支持的导入/草稿发现途径，由唯一操作者确认剪映已识别本次完整工程。只需记录工程名、路径、操作结果及对应 UI/工具证据，不试改、不保存重开、不从剪映导出视频，也不主动询问这些额外验收。成功后立即给工程与完整 MP4 路径，让用户检查交付成果。
 
-深度验收包括实际打开、在副本试改字幕/蒙版/切点/背景、保存重开与原生导出。用户同意后按其所选范围执行一轮；完成或发现明确阻塞即报告，修复后仅复查变化和受影响项。未选的项目继续记未验证，部分验收不伪填完整 J1–J4。软件首次使用的 UI 兼容试点也属于此选择；真实导入/编辑请求按用户明确授权执行，不额外扩大为整套验收。
+`install` 只复制工程，`STATIC_VALIDATED_NATIVE_UI_PENDING` 只证明静态结构，两者均不能单独证明导入成功。当前没有自动认证剪映识别的 CLI：代理用实际可用的 UI 工具检查首页工程项或打开结果，保留简短证据即可。无法确认时明确报告“工程已生成，导入待确认”及具体原因，给出文件和本机导入说明，不能虚报成功或不断重复质检。
 
 ## Mac／Windows 与替代路线
 

@@ -144,7 +144,7 @@ def validate_media(record, base, ffprobe=None, require_audio=False):
     return path, fps, count
 
 
-def load_timeline(path, approval, ffprobe=None):
+def load_timeline(path, approval, ffprobe=None, project_config=None):
     path = Path(path).resolve(); base = path.parent; spec = read(path)
     need(spec.get('schema_version') == 1, 'Unknown timeline schema_version')
     need(spec.get('project_kind') in {'full','pilot'}, 'Record project_kind full or pilot')
@@ -153,7 +153,7 @@ def load_timeline(path, approval, ffprobe=None):
                 'preview':resolved(base,spec['preview']['path']), 'background':resolved(base,spec['background']['path']), 'timeline':path}
     for key, record in [('source',spec['source']),('ass',spec['captions']),('preview',spec['preview']),('background',spec['background'])]:
         need(bindings[key].is_file() and file_hash(bindings[key]) == record['sha256'], 'Input hash mismatch: '+key)
-    errors = validate_report(approval, 'preview', bindings)
+    errors = validate_report(approval, 'preview', bindings, project_config=project_config)
     need(not errors, 'Preview approval gate blocked: '+'; '.join(errors))
     source,fps,count = validate_media(spec['source'],base,ffprobe,True)
     background,bfps,bcount = validate_media(spec['background'],base,ffprobe)
@@ -218,12 +218,33 @@ def track(name, kind, segments, mute=False):
     return dict(attribute=int(mute),flag=0,id=uid(),is_default_name=False,name=name,segments=segments,type=kind)
 
 
-def build(timeline, approval_report, output, name, target_platform, registered_root=None, ffprobe=None):
+def freeze_workflow_evidence(workflow, report_base, destination):
+    """Freeze authorization bytes for offline project checks, never for new production."""
+    def freeze(reference, prefix):
+        source=resolved(report_base,reference['path'])
+        digest=file_hash(source)
+        if reference.get('sha256') is not None:
+            need(reference['sha256']==digest,'Workflow evidence changed during build')
+        name=prefix+'-'+digest+source.suffix
+        shutil.copy2(source,destination/'Evidence'/name)
+        return {'path':'Evidence/'+name,'sha256':digest}
+    auth_path=resolved(report_base,workflow['authorization']['path'])
+    authorization=read(auth_path)
+    user=authorization['user_authorization']['evidence']
+    # The authorization remains byte-identical. Only this envelope relocates refs.
+    evidence=dict(user,path=str(resolved(auth_path.parent,user['path'])))
+    return {'mode':'full_auto','frozen_snapshot':True,
+            'settings':freeze(workflow['settings'],'workflow-settings'),
+            'authorization':freeze(workflow['authorization'],'workflow-authorization'),
+            'user_evidence':freeze(evidence,'workflow-user-evidence')}
+
+
+def build(timeline, approval_report, output, name, target_platform, registered_root=None, ffprobe=None, project_config=None):
     output=external_output(output)
     need(output.name.isascii(), 'Candidate directory name must be ASCII; display name may be Chinese')
     safe_name(name)
     need(target_platform in {'mac','windows'}, 'Select mac or windows')
-    spec,bindings,rows,fps,count,duration=load_timeline(timeline,approval_report,ffprobe)
+    spec,bindings,rows,fps,count,duration=load_timeline(timeline,approval_report,ffprobe,project_config)
     registered=(Path(registered_root).expanduser().resolve()/name) if registered_root else output
     content=read(ASSETS/'draft_content_template.json');meta=read(ASSETS/'draft_meta_info.json')
     did=uid();now=int(time.time()*1e6);layout=spec['layout'];W,H=layout['width'],layout['height']
@@ -300,9 +321,24 @@ def build(timeline, approval_report, output, name, target_platform, registered_r
                 evidence_name='evidence-'+file_hash(origin)+origin.suffix
                 shutil.copy2(origin,temp/'Evidence'/evidence_name);values.append('Evidence/'+evidence_name)
             check['evidence']=values
-        origin=resolved(Path(approval_report).resolve().parent,report['user_approval']['evidence'])
-        evidence_name='approval-'+file_hash(origin)+origin.suffix
-        shutil.copy2(origin,temp/'Evidence'/evidence_name);report['user_approval']['evidence']='Evidence/'+evidence_name
+        report_base=Path(approval_report).resolve().parent
+        if report.get('workflow',{}).get('mode')=='full_auto':
+            report['workflow']=freeze_workflow_evidence(report['workflow'],report_base,temp)
+            ref=report['source_provenance']['edit_map']
+            origin=resolved(report_base,ref['path'])
+            need(file_hash(origin)==ref['sha256'],'Source provenance changed during build')
+            evidence_name='edit-map-'+ref['sha256']+origin.suffix
+            shutil.copy2(origin,temp/'Evidence'/evidence_name)
+            ref['path']='Evidence/'+evidence_name
+            for item in report['ai_review']['evidence']:
+                origin=resolved(report_base,item['path'])
+                need(file_hash(origin)==item['sha256'],'AI review evidence changed during build')
+                evidence_name='ai-review-'+item['sha256']+origin.suffix
+                shutil.copy2(origin,temp/'Evidence'/evidence_name);item['path']='Evidence/'+evidence_name
+        else:
+            origin=resolved(report_base,report['user_approval']['evidence'])
+            evidence_name='approval-'+file_hash(origin)+origin.suffix
+            shutil.copy2(origin,temp/'Evidence'/evidence_name);report['user_approval']['evidence']='Evidence/'+evidence_name
         write(temp/'approval-report.json',report)
         errors=validate(temp)['errors'];need(not errors,'Generated candidate invalid: '+'; '.join(errors))
         need(not output.exists(),'Output appeared during build; refusing overwrite')
@@ -374,10 +410,10 @@ def validate(project, native_report=None):
             need(m['path']==str(registered/r['file']),'Media reference differs from registered Resources')
         need(len(meta['draft_materials'][0]['value'])==len(manifest['resources']),'Media registry incomplete')
         report=read(root/'approval-report.json')
-        need(report['stage']=='preview' and report['user_approval']['status']=='approved','Approval record changed')
+        need(report['stage']=='preview','Preceding preview report changed')
         need(all(report['artifacts'].get(k,{}).get('sha256')==v for k,v in manifest['approval_bindings'].items()),'Stored approval bindings changed')
         frozen_inputs={'source':root/manifest['resources'][0]['file'],'background':root/manifest['resources'][1]['file'],'ass':capfile}
-        need(not validate_report(root/'approval-report.json','preview',frozen_inputs),'Frozen preview gate evidence invalid')
+        need(not validate_report(root/'approval-report.json','preview',frozen_inputs,live_config_required=report.get('workflow',{}).get('mode')!='full_auto'),'Frozen preview gate evidence invalid')
         if native_report:
             native_record=read(native_report)
             export_value=native_record.get('artifacts',{}).get('native_export',{}).get('path')
@@ -509,7 +545,7 @@ def main(argv=None):
             for field in ['timeline','approval_report','output','name','platform','registered_root','ffprobe']:
                 if getattr(args,field,None) is None:setattr(args,field,defaults.get(field))
             need(all(getattr(args,x,None) for x in ['timeline','approval_report','output','name','platform']), 'Build requires timeline, approval_report, output, name, platform')
-            result=build(args.timeline,args.approval_report,args.output,args.name,args.platform,args.registered_root,args.ffprobe)
+            result=build(args.timeline,args.approval_report,args.output,args.name,args.platform,args.registered_root,args.ffprobe,project_config=args.project_config)
         elif args.command=='discover':result=discover(args.platform,args.app_path,args.draft_root)
         elif args.command=='validate':
             result=validate(args.project,args.native_report)

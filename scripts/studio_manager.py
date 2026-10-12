@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -34,6 +35,7 @@ RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
             *(f"lpt{i}" for i in range(1, 10))}
 DEFAULT_SETTINGS = {
     "schema_version": 1,
+    "workflow": {"mode": "unselected", "state": "pending", "revision": 0},
     "pipeline": {
         "analyze": {"retake_policy": "none"},
         "rough-cut": {},
@@ -46,6 +48,8 @@ DEFAULT_SETTINGS = {
 PREF_PREFIXES = ("pipeline.", "editing.", "delivery.")
 ARTIFACT_STAGES = {"analysis": "analyze", "rough_cut": "rough-cut",
                    "captions": "captions", "preview": "preview", "native_project": None}
+ARTIFACT_GATES = {"analysis": "analysis", "rough_cut": "rough-cut",
+                  "captions": "captions", "preview": "preview", "native_project": "jianying-basic"}
 
 
 def now():
@@ -192,7 +196,7 @@ def init_project(args):
         write(settings_path(project), DEFAULT_SETTINGS)
         (project / "00_project_info" / "README_zh.md").write_text(
             f"# {args.title}\n\n原片只读；原始名称与位置见project.json。\n\n"
-            "先分析，再按本次授权精剪；粗剪确认后字幕，字幕确认后蒙版，完整预览确认后工程。\n\n" +
+            "先选择半自动或全自动；未选择不当作全自动授权。半自动逐阶段确认；全自动先收齐选项和一次真实授权，再由AI质检后连续制作，遇到未决问题暂停。\n\n" +
             "\n".join(f"- {k}：{v}" for k, v in PROJECT_DIRS.items()) +
             "\n\nproject.json记录预览和确认。修改已确认文件会使其确认失效。\n", encoding="utf-8")
     return {"status": "created", "project": str(project), "settings": str(settings_path(project)),
@@ -212,14 +216,188 @@ def assign(obj, key, value):
     cursor[parts[-1]] = value
 
 
+def invalidate_workflow(settings, reason):
+    """Revoke active automatic progression without changing user approvals."""
+    workflow = settings.get("workflow")
+    if not isinstance(workflow, dict) or workflow.get("mode") != "full_auto":
+        return
+    if workflow.get("authorization"):
+        workflow.setdefault("authorization_history", []).append({
+            "authorization": workflow.pop("authorization"), "invalidated_at": now(),
+            "reason": reason})
+    workflow.update(state="pending", revision=int(workflow.get("revision", 0))+1,
+                    invalidation_reason=reason)
+
+
+def workflow_evidence(project, supplied, action):
+    """Snapshot an actual UTF-8 message; this cannot authenticate its author."""
+    source = Path(supplied).expanduser().resolve()
+    if not source.is_file():
+        raise ValueError("workflow needs an existing UTF-8 evidence file")
+    text = source.read_text(encoding="utf-8-sig")
+    if not text.strip():
+        raise ValueError("workflow evidence file must contain the actual message")
+    target = project / "00_project_info" / "workflow_records" / (action + "_" + uuid.uuid4().hex + ".txt")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+    return {"path": str(target), "sha256": sha(target), "recorded_at": now(),
+            "message": text, "note": "stored message evidence; structural validation does not authenticate its author"}
+
+
+def selected_workflow(settings):
+    """Legacy projects retain semi-automatic behavior; new ones stay unselected."""
+    return settings.get("workflow", {"mode":"semi_auto", "state":"active", "legacy":True})
+
+
+def workflow_record(settings, config):
+    current = selected_workflow(settings)
+    return {"mode":current.get("mode", "unselected"),
+            "settings":{"path":str(Path(config).resolve())},
+            "authorization":current.get("authorization")}
+
+
+def prepare_workflow_choices(settings, choices):
+    """Apply explicit user choices to the effective pipeline before binding it."""
+    if not isinstance(choices, dict):
+        raise ValueError("workflow choices must be a JSON object")
+    required = ("retake_policy", "font_name", "mask_shape", "background", "background_motion", "delivery")
+    if any(key not in choices or choices[key] in (None, "", {}) for key in required):
+        raise ValueError("full_auto requires explicit choices: " + ", ".join(required))
+    choices = json.loads(json.dumps(choices, ensure_ascii=False, allow_nan=False))
+    if choices["retake_policy"] not in ("none", "last_complete"):
+        raise ValueError("invalid retake policy")
+    if choices["mask_shape"] not in ("circle", "rounded_square"):
+        raise ValueError("invalid mask shape")
+    if not isinstance(choices["font_name"], str) or not choices["font_name"].strip():
+        raise ValueError("font_name must be an explicitly selected font")
+    background = choices["background"]
+    if isinstance(background, str):
+        if background in ("default", "skill_default"):
+            background = {"kind":"skill_default", "path":str(Path(__file__).resolve().parents[1]/"assets/default-background.jpg")}
+        else:
+            background = {"kind":"custom", "path":background}
+    if not isinstance(background, dict) or not background.get("path"):
+        raise ValueError("background needs the selected existing file path, or 'default'")
+    background_path = Path(background["path"]).expanduser().resolve()
+    if not background_path.is_file():
+        raise ValueError("selected background file is missing")
+    digest = sha(background_path)
+    if background.get("sha256") and background["sha256"] != digest:
+        raise ValueError("selected background changed")
+    background.update(path=str(background_path), sha256=digest)
+    choices["background"] = background
+    motion = choices["background_motion"]
+    if isinstance(motion, str):
+        if motion != "static":
+            raise ValueError("moving background choice needs direction and explicit positive speed")
+        direction, speed = "static", 0.0
+    elif isinstance(motion, dict):
+        direction = motion.get("direction", motion.get("mode"))
+        speed = float(motion.get("speed", motion.get("speed_px_per_second", 0)))
+    else:
+        raise ValueError("invalid background_motion choice")
+    if direction not in ("static", "left", "right") or not math.isfinite(speed) or speed < 0 or (direction != "static" and speed <= 0):
+        raise ValueError("background motion requires static, or left/right with positive finite speed")
+    if direction == "static" and speed != 0:
+        raise ValueError("static background must have zero speed")
+    if isinstance(motion, dict):
+        choices["background_motion"] = {**motion,"direction":direction,"speed":speed}
+    pipeline = settings.setdefault("pipeline", {})
+    pipeline.setdefault("analyze", {})["retake_policy"] = choices["retake_policy"]
+    pipeline.setdefault("captions", {})["font_name"] = choices["font_name"]
+    font_value = choices.get("font_file") or pipeline["captions"].get("font_file")
+    if not font_value:
+        raise ValueError("resolve the selected local font file before full_auto authorization")
+    font = Path(font_value).expanduser().resolve()
+    if not font.is_file():
+        raise ValueError("selected font file is missing")
+    choices["font_file"] = str(font)
+    choices["font_asset"] = {"path":str(font),"sha256":sha(font)}
+    pipeline["captions"]["font_file"] = str(font)
+    pipeline.setdefault("preview", {}).update(mask_shape=choices["mask_shape"],
+        background=str(background_path), background_motion=direction, background_speed=speed)
+    settings.setdefault("confirmed_choices", {}).update(choices)
+    return settings["confirmed_choices"]
+
+
+def configure_workflow(args):
+    """Select, authorize, pause or explicitly resume a project's workflow."""
+    project, manifest, data = info(args.project)
+    action = args.action
+    if action not in ("select", "authorize", "pause", "resume"):
+        raise ValueError("unknown workflow action")
+    with lock(project / "00_project_info"):
+        project, manifest, data = info(project)
+        settings = read(settings_path(project))
+        current = dict(selected_workflow(settings))
+        evidence = workflow_evidence(project, args.evidence_file, action)
+        old_authorization = current.get("authorization")
+        history = list(current.get("authorization_history", []))
+        if action == "select":
+            if args.mode not in ("semi_auto", "full_auto"):
+                raise ValueError("select requires semi_auto or full_auto")
+            if old_authorization:
+                history.append({"authorization":old_authorization, "invalidated_at":now(), "reason":"workflow mode selected again"})
+            current = {"mode":args.mode, "state":"pending" if args.mode == "full_auto" else "active",
+                       "run_id":uuid.uuid4().hex, "revision":int(current.get("revision",0))+1,
+                       "selection_evidence":evidence, "authorization_history":history}
+        elif action == "pause":
+            if old_authorization:
+                history.append({"authorization":old_authorization, "invalidated_at":now(), "reason":"workflow paused"})
+            current.pop("authorization", None)
+            current.update(state="paused", revision=int(current.get("revision",0))+1,
+                           pause_evidence=evidence, authorization_history=history)
+        else:
+            mode = current.get("mode")
+            if mode not in ("semi_auto", "full_auto"):
+                raise ValueError("select a workflow mode first")
+            if action == "authorize" and mode != "full_auto":
+                raise ValueError("authorize is only for the full_auto workflow")
+            if action == "resume" and current.get("state") != "paused":
+                raise ValueError("resume requires a paused workflow")
+            if action == "authorize" and current.get("state") != "pending":
+                raise ValueError("authorize requires a pending full_auto selection")
+            if mode == "full_auto":
+                if any(row["current_status"] != "unchanged" for row in source_states(data, project)):
+                    raise ValueError("source media changed or missing; full_auto authorization is blocked")
+                if not getattr(args,"choices_file",None):
+                    raise ValueError("full_auto authorization/resume requires the collected choices JSON")
+                choices = prepare_workflow_choices(settings, read(Path(args.choices_file).expanduser().resolve()))
+                # A resumed run always gets a new identity; previous reports
+                # cannot become valid by toggling paused back to active.
+                current.update(run_id=uuid.uuid4().hex, state="pending",
+                               revision=int(current.get("revision",0))+1)
+                current.pop("authorization",None)
+                settings["workflow"] = current
+                from workflow_mode import create_authorization
+                authorization = create_authorization(settings, data["sources"], choices, evidence["path"],
+                    message=evidence["message"], recorded_at=evidence["recorded_at"],
+                    settings_path=settings_path(project))
+                target = project / "00_project_info" / "workflow_records" / ("authorization_"+uuid.uuid4().hex+".json")
+                write(target,authorization)
+                current["authorization"] = {"path":str(target), "sha256":sha(target)}
+            current.update(state="active", last_evidence=evidence)
+        settings["workflow"] = current
+        write(settings_path(project), settings)
+        data["settings_history"].append({"action":"workflow_"+action, "mode":current["mode"],
+            "state":current["state"], "revision":current.get("revision",0), "evidence":evidence, "at":now()})
+        write(manifest,data)
+    return {"status":"updated", "workflow":current, "settings":str(settings_path(project)),
+            "note":"workflow authorization is separate from per-artifact user approval and does not prove media quality"}
+
+
 def set_setting(args):
     project, manifest, data = info(args.project)
     value = json.loads(args.value)
     with lock(project / "00_project_info"):
         project, manifest, data = info(project)
         settings = read(settings_path(project))
+        previous = json.loads(json.dumps(settings, ensure_ascii=False))
         assign(settings, args.key, value)
         settings.setdefault("confirmed_choices", {})[args.key] = {"value": value, "evidence": args.evidence, "at": now()}
+        if settings != previous:
+            invalidate_workflow(settings, "project settings changed")
         write(settings_path(project), settings)
         data["settings_history"].append({"key": args.key, "value": value, "evidence": args.evidence, "at": now()})
         write(manifest, data)
@@ -271,6 +449,8 @@ def apply_preferences(args):
                 "value": row["value"], "origin": "preference", "preference_id": row["id"],
                 "evidence": row["evidence"], "at": now()}
             changes.append(row["key"])
+        if changes:
+            invalidate_workflow(settings, "confirmed preferences changed effective settings")
         write(settings_path(project), settings)
         data["settings_history"].append({"action": "apply_confirmed_preferences", "keys": changes, "at": now()})
         write(manifest, data)
@@ -377,7 +557,7 @@ def source_states(data, project):
     return result
 
 
-def artifact_state(row, rows, settings, visiting=None, sources_valid=True):
+def artifact_state(row, rows, settings, visiting=None, sources_valid=True, project_config=None):
     if not sources_valid:
         return "source_changed_approval_invalid"
     visiting = set() if visiting is None else set(visiting)
@@ -392,9 +572,38 @@ def artifact_state(row, rows, settings, visiting=None, sources_valid=True):
         return "settings_changed_approval_invalid"
     for key in row.get("depends_on", []):
         parent = next((r for r in rows if r["id"] == key), None)
-        if not parent or artifact_state(parent, rows, settings, visiting) != "approved":
+        acceptable = {"approved"}
+        if settings.get("workflow", {}).get("mode") == "full_auto":
+            acceptable.add("ai_reviewed")
+        if not parent or artifact_state(parent, rows, settings, visiting,
+                                        project_config=project_config) not in acceptable:
             return "upstream_not_approved"
-    return "approved" if row.get("approval") else "awaiting_confirmation"
+    if row.get("approval"):
+        return "approved"
+    review = row.get("ai_review")
+    if review:
+        if settings.get("workflow", {}).get("mode") != "full_auto" or not project_config:
+            return "workflow_authorization_invalid"
+        try:
+            report = Path(review["report"]["path"])
+            if not report.is_file() or sha(report) != review["report"]["sha256"]:
+                return "review_evidence_changed"
+            inputs = {key: Path(value["path"]) for key, value in review["inputs"].items()}
+            if any(not path.is_file() or sha(path) != review["inputs"][key]["sha256"]
+                   for key, path in inputs.items()):
+                return "review_inputs_changed"
+            native_approval = review.get("native_approval_report")
+            if native_approval and (not Path(native_approval["path"]).is_file()
+                    or sha(native_approval["path"]) != native_approval["sha256"]):
+                return "review_inputs_changed"
+            from stage_gate import validate_report
+            if validate_report(report, ARTIFACT_GATES[row["kind"]], inputs,
+                               project_config=project_config):
+                return "ai_review_invalid"
+        except (OSError, ValueError, KeyError, TypeError):
+            return "ai_review_invalid"
+        return "ai_reviewed"
+    return "awaiting_confirmation"
 
 
 def register_artifact(args):
@@ -427,8 +636,9 @@ def approve(args):
         if not row:
             raise ValueError("artifact id not found")
         sources_valid = all(row["current_status"] == "unchanged" for row in source_states(data, project))
-        state = artifact_state(row, data["artifacts"], read(settings_path(project)), sources_valid=sources_valid)
-        if state not in ("approved", "awaiting_confirmation"):
+        state = artifact_state(row, data["artifacts"], read(settings_path(project)), sources_valid=sources_valid,
+                               project_config=settings_path(project))
+        if state not in ("approved", "awaiting_confirmation", "ai_reviewed"):
             raise ValueError("cannot approve stale artifact: " + state)
         record = {"artifact_id": row["id"], "sha256": row["sha256"], "message": args.evidence,
                   "recorded_at": now(), "status": "approved", "note": "user confirmation record; not machine audio or native UI validation"}
@@ -440,14 +650,110 @@ def approve(args):
     return {"status": "recorded", "approval": record, "evidence": str(evidence)}
 
 
+def review_artifact(args):
+    """Record an actual full-auto AI gate without manufacturing user approval."""
+    project, manifest, data = info(args.project)
+    with lock(project / "00_project_info"):
+        project, manifest, data = info(project)
+        settings = read(settings_path(project))
+        if selected_workflow(settings).get("mode") != "full_auto":
+            raise ValueError("ai_reviewed progression requires full_auto; semi_auto keeps user approval")
+        from workflow_mode import validate_workflow
+        errors = validate_workflow(workflow_record(settings, settings_path(project)),
+                                   settings_path(project).parent, project_config=settings_path(project))
+        if errors:
+            raise ValueError("invalid workflow authorization: " + "; ".join(errors))
+        if any(source["current_status"] != "unchanged" for source in source_states(data,project)):
+            raise ValueError("source media changed or missing")
+        row = next((r for r in data["artifacts"] if r["id"] == args.artifact_id), None)
+        if not row:
+            raise ValueError("artifact id not found")
+        path = Path(row["path"])
+        if not path.is_file() or sha(path) != row["sha256"]:
+            raise ValueError("artifact changed; register the new version first")
+        stage = row.get("settings_stage")
+        if stage and object_hash(settings.get("pipeline",{}).get(stage,{})) != row.get("settings_sha256"):
+            raise ValueError("artifact settings changed; register the new version first")
+        for parent_id in row.get("depends_on",[]):
+            parent = next((r for r in data["artifacts"] if r["id"]==parent_id),None)
+            if not parent or artifact_state(parent,data["artifacts"],settings,
+                    project_config=settings_path(project)) not in ("approved","ai_reviewed"):
+                raise ValueError("upstream artifact is not approved or AI reviewed")
+        report_path = Path(args.report).expanduser().resolve()
+        declared = read(Path(args.inputs_file).expanduser().resolve())
+        if not isinstance(declared,dict) or not declared:
+            raise ValueError("inputs-file must map gate input keys to actual file paths")
+        inputs = {}
+        for key,value in declared.items():
+            value = value.get("path") if isinstance(value,dict) else value
+            if not isinstance(key,str) or not isinstance(value,str):
+                raise ValueError("invalid gate input mapping")
+            candidate = Path(value).expanduser().resolve()
+            if not candidate.is_file():
+                raise ValueError("gate input is missing: " + key)
+            inputs[key] = candidate
+        if path.resolve() not in inputs.values():
+            raise ValueError("review report must bind the registered artifact itself")
+        report = read(report_path)
+        if report.get("workflow",{}).get("mode") != "full_auto" or not report.get("ai_review"):
+            raise ValueError("an actual full_auto AI review report is required, not a manufactured user approval")
+        from stage_gate import validate_report
+        errors = validate_report(report_path,ARTIFACT_GATES[row["kind"]],inputs,
+                                 project_config=settings_path(project))
+        if errors:
+            raise ValueError("AI review gate failed: " + "; ".join(errors))
+        native = None
+        native_approval = None
+        if row["kind"] == "native_project":
+            if "project" not in inputs or "manifest" not in inputs:
+                raise ValueError("native basic review requires project and manifest inputs")
+            native_root = inputs["project"].parent
+            if inputs["manifest"] != (native_root / "generation-manifest.json").resolve():
+                raise ValueError("native manifest must belong to this exact project directory")
+            manifest_data = read(inputs["manifest"])
+            if not isinstance(manifest_data.get("content_file"),str) or (
+                    native_root / manifest_data["content_file"]).resolve() != inputs["project"]:
+                raise ValueError("native manifest must bind this exact project content file")
+            native_approval_path = native_root / "approval-report.json"
+            frozen = read(native_approval_path)
+            frozen_auth = frozen.get("workflow",{}).get("authorization",{})
+            current_auth = selected_workflow(settings).get("authorization",{})
+            if frozen_auth.get("sha256") != current_auth.get("sha256"):
+                raise ValueError("native project belongs to another workflow authorization")
+            from jianying_adapter import validate
+            native = validate(native_root)
+            if native.get("errors") or native.get("status") != "STATIC_VALIDATED_NATIVE_UI_PENDING":
+                raise ValueError("native basic validation failed: " + repr(native))
+            native_approval = {"path":str(native_approval_path),"sha256":sha(native_approval_path)}
+        record = {"status":"ai_reviewed", "recorded_at":now(),
+                  "report":{"path":str(report_path),"sha256":sha(report_path)},
+                  "inputs":{key:{"path":str(value),"sha256":sha(value)} for key,value in inputs.items()},
+                  "workflow_authorization":selected_workflow(settings)["authorization"],
+                  "native_basic_validation":native,
+                  "native_approval_report":native_approval,
+                  "note":"AI quality review under one workflow authorization; not per-artifact user approval or native UI acceptance"}
+        row["ai_review"] = record
+        data["stage"] = row["kind"] + "_ai_reviewed"
+        write(manifest,data)
+    return {"status":"ai_reviewed", "artifact_id":row["id"], "review":record}
+
+
 def status(args):
     project, _, data = info(args.project)
     settings = read(settings_path(project))
     sources = source_states(data, project)
     sources_valid = all(row["current_status"] == "unchanged" for row in sources)
-    artifacts = [{**row, "current_status": artifact_state(row, data["artifacts"], settings, sources_valid=sources_valid)} for row in data["artifacts"]]
+    artifacts = [{**row, "current_status": artifact_state(row, data["artifacts"], settings,
+                  sources_valid=sources_valid, project_config=settings_path(project))} for row in data["artifacts"]]
+    workflow = dict(selected_workflow(settings))
+    if workflow.get("mode") == "full_auto":
+        from workflow_mode import validate_workflow
+        errors = validate_workflow(workflow_record(settings,settings_path(project)),settings_path(project).parent,
+                                   project_config=settings_path(project))
+        workflow.update(authorization_valid=not errors, errors=errors)
     return {"project": str(project), "title": data["title"], "recorded_stage": data["stage"],
             "artifacts": artifacts, "settings": settings, "sources": sources,
+            "workflow":workflow,
             "guide": str(project / "00_project_info" / "README_zh.md"),
             "message": "确认状态依据当前文件和上游依赖重新检查；不代表已完成听校或剪映验收。"}
 
@@ -491,6 +797,17 @@ def main():
     p.add_argument("--project", required=True); p.add_argument("--artifact-id", required=True)
     p.add_argument("--evidence", required=True, help="actual user confirmation, not an agent's proposed approval")
     p.set_defaults(func=approve)
+    p = sub.add_parser("workflow")
+    p.add_argument("action", choices=("select","authorize","pause","resume"))
+    p.add_argument("--project",required=True)
+    p.add_argument("--mode",choices=("semi_auto","full_auto"))
+    p.add_argument("--evidence-file",required=True,help="existing UTF-8 file recording the actual user message; never synthesized approval")
+    p.add_argument("--choices-file",help="collected explicit choices JSON for full_auto authorize/resume")
+    p.set_defaults(func=configure_workflow)
+    p = sub.add_parser("review-artifact")
+    p.add_argument("--project",required=True);p.add_argument("--artifact-id",required=True)
+    p.add_argument("--report",required=True);p.add_argument("--inputs-file",required=True)
+    p.set_defaults(func=review_artifact)
     p = sub.add_parser("status")
     p.add_argument("--project", required=True); p.set_defaults(func=status)
     args = parser.parse_args()
