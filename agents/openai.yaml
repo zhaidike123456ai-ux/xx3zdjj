@@ -1,6 +1,6 @@
 interface:
   display_name: "xx3zdjj"
   short_description: "全自动或半自动本地口播精剪，每阶段 AI 质检，制作字幕、蒙版和剪映工程"
-  default_prompt: "使用 $xx3zdjj 处理我的口播，先让我选择全自动或半自动；按所选模式自主安排制作和独立质检，剪映工程成功导入后即交付。"
+  default_prompt: "使用 $xx3zdjj 处理我的口播，尚未选择模式时先让我选择全自动或半自动；全自动收齐信息后先告知我即将开始，再按所选模式自主制作和独立质检，两种模式最终都交付剪映工程文件。"
 policy:
   allow_implicit_invocation: true
