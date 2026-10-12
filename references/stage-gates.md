@@ -1,6 +1,6 @@
 # 阶段报告与版本闸门
 
-`run_pipeline.py captions`现必须给`--approval-report rough-cut-gate.json`；`preview`必须给`--approval-report captions-gate.json`。检查在转写或合成前执行。缺报告、失败/未验证检查、未决问题或本模式授权不满足时退出2，不制作后续媒体。
+`run_pipeline.py captions`现必须给`--approval-report rough-cut-gate.json`；`preview`必须给`--approval-report captions-gate.json`。检查在转写或合成前执行。缺报告、必需机器检查失败/未验证、未决问题或本模式授权不满足时退出2，不制作后续媒体。v2.2.2 起实际听校不属于必需检查，缺少听音频能力单列 `not_required`，不因此阻断。
 
 报告放当前项目，不放技能目录。它记录真实检查及对应模式授权，不是让代理自动把所有字段填通过的模板。以下是半自动结构示意，全自动区别见下文：
 
@@ -31,15 +31,15 @@
 
 ## 每阶段检查
 
-- **analysis**（兼容别名 `analyze`）：A1 原片分析覆盖与来源；A2 拟删/保留计划、声学边界及重说策略；A3 原音复核和疑点处理。全自动 `rough-cut` 必须带此阶段的 `--decision-report`，绑定当前原片和实际删除参数。
+- **analysis**（兼容别名 `analyze`）：A1 原片分析覆盖与来源；A2 拟删/保留计划、声学边界及重说策略；A3 局部机器证据复核和疑点处理。全自动 `rough-cut` 必须带此阶段的 `--decision-report`，绑定当前原片和实际删除参数。
 - **jianying-basic**：B1 完整工程、素材与版本一致；B2 主要轨道、全长、字幕与预览对应。只记录基础质量，不代表剪映已导入；导入结束条件见剪映适配。
-- **rough-cut**：G1全片分析覆盖；G2重录/气口删留清单；G3批准项实际执行；G4字头尾音及淡化边界保护；G5剪后逐组对照、残留/吞字/误删复核；G6全片解码、规格、音画时长与版本路径。
-- **captions**：C1文字与实际声音校对；C2最终音轨词音同步及连续换条；C3语义拆分、无句尾孤字、实际渲染字高/最长条/字形可见；C4完整字幕试听文件解码及对应模式批准。报告的`artifacts`同时记录`source`（批准粗剪）与`ass`（批准字幕）的SHA256，进入蒙版时必须两者一致。
+- **rough-cut**：G1全片分析覆盖；G2重录/气口删留清单；G3批准项实际执行；G4词时间、声学边界和淡化范围保护；G5剪后逐组转写对照、残留警报处理、词覆盖与剪辑谱系核对；G6全片解码、规格、音画时长与版本路径。
+- **captions**：C1转写、稿件与字幕的文字匹配及疑点处理；C2最终音轨有效词时间、字幕同步及连续换条；C3语义拆分、无句尾孤字、实际渲染字高/最长条/字形可见；C4完整字幕预览文件解码及对应模式批准。报告的`artifacts`同时记录`source`（批准粗剪）与`ass`（批准字幕）的SHA256，进入蒙版时必须两者一致。
 - **preview**：M1人物首帧与逐段取景；M2形状/背景/字号/位置符合已确认选项；M3原声与字幕内容时序未改变；M4完整MP4解码及对应模式批准。工程build使用此报告并绑定source/ass/preview/background/timeline五项hash，执行代理根据实际批准内容补齐记录，不自动制造确认。
 
-状态只在证据支持时填`passed`；若无实际听校能力，对相应项目用`unverified`并交原音疑点，不能称通过。用户实际听校确认可记`user_confirmed`并保存该版本的确认记录。已知残留、误删、吞字未修时计入`known_unfixed`；等待疑点选择计入`unresolved`；删除批准却未执行计入`approved_not_executed`。三个数必须全部为整数0才能推进，不能省字段或把`false`写成0。
+状态只在机器证据支持时填 `passed`。`word_integrity` 的机器范围是词时间有效性、切点/淡化边界、词覆盖与源到成片的谱系一致性；不能据此保证完整音素、听感或绝对无吞字。实际听校单列 `not_required`，不能把无音频感知写为必需机器检查的 `unavailable/unverified`。真实检测失败、无效词时间、覆盖缺口和未处理警报仍须修复或完成有证据的处理，不能用解码/结构通过替代。已知残留、误删、吞字未修时计入 `known_unfixed`；未解决疑点计入 `unresolved`；删除批准却未执行计入 `approved_not_executed`。三个数必须全部为整数0才能推进，不能省字段或把 `false` 写成0。
 
-半自动要求该阶段具体用户批准；用户只是同意继续研究或选字体，不代表批准媒体。全自动要求一次有效的输入/设置授权及本版本完整 `ai_review`，不得包含伪造 `user_approval`。改媒体或字幕后需新版本检查，半自动再取得用户确认；只改样式无需重新转写，重剪声音须重新对齐。完整协议见 [模式与授权](workflow-modes.md#脚本与报告协议)。
+半自动要求该阶段具体用户批准；用户只是同意继续研究或选字体，不代表批准媒体，也不额外要求用户完成专门听校。全自动要求一次有效的输入/设置授权及本版本完整 `ai_review`，默认方法为 `combined_evidence_review` 或 `machine_evidence_review`，无音频 `capability` 前提，不得包含伪造 `user_approval`。改媒体或字幕后需新版本检查，半自动再取得用户确认；只改样式无需重新转写，重剪声音须重新对齐。完整协议见 [模式与授权](workflow-modes.md#脚本与报告协议)。
 
 小白只看完整预览和简短问题，不填写JSON。执行代理保存报告，命令与内部数据不要求用户操作。运行`python scripts/test_stage_gate.py`验证阻断行为；这是记录校验测试，不是媒体质量验收。
 
@@ -49,11 +49,11 @@
 
 协作记录保存制作/检查者标识、版本、覆盖范围、结论和证据。它是代理必须执行的工作流要求；当前脚本校验媒体与报告，不自动创建子智能体，也不能认证审查者身份或真实听看行为。不得把脚本成功当成独立质检完成。
 
-工具确实不可用或用户要求单代理时，主代理仍须质检，独立检查状态保持未完成并说明原因。独立代理缺席本身不制造媒体缺陷，也不永久锁住工程；只有既有检查证据、警报处理、版本与对应模式授权真实齐备时才能继续。任何实际听校/UI缺口仍按原有规则处理，不能因降级而自动通过。
+工具确实不可用或用户要求单代理时，主代理仍须机器证据质检，独立检查状态保持未完成并说明原因。独立代理缺席本身不制造媒体缺陷，也不永久锁住工程；只有机器检查证据、警报处理、版本与对应模式授权真实齐备时才能继续。没有实际听音频能力不阻断；剪映 UI 导入无法确认时仍如实标记“导入待确认”。
 
 ## 粗剪警报闭环（v2.1.0 起）
 
-`rough-cut` 的零计数不能替代 `residual_review`。检查器读取真正的残留报告，逐项校验执行状态、范围、警报 ID 和媒体 hash；缺失或 legacy 报告不能通过。`resolutions` 无需填写没有的处理结论，存在待核项时由执行代理根据真实听校记录生成。
+`rough-cut` 的零计数不能替代 `residual_review`。检查器读取真正的残留报告，逐项校验执行状态、范围、警报 ID 和媒体 hash；缺失或 legacy 报告不能通过。`resolutions` 无需填写没有的处理结论，存在待核项时由执行代理根据实际机器证据审查生成。
 
 残留报告必须保留 `source_review_lineage` 的分析报告和 edit-map 引用及 hash，绑定同一原片与当前成片。每个上游警报的保留分片或删除后衔接处都要进入当前复核。移走成片导致引用丢失不能当作无报警。
 
@@ -67,14 +67,14 @@
   "alerts": [{
     "alert_id": "报告中的真实警报ID",
     "outcome": "retain_normal_repetition",
-    "assessment": "实际复听后的判断",
-    "reviewer": {"kind": "user", "method": "user_listening", "recorded_at": "实际时间", "quote": "实际反馈"},
-    "evidence": [{"path": "actual_listening_record.md", "sha256": "证据文件SHA256", "kind": "listening_confirmation"}]
+    "assessment": "填写该警报的具体结论：哪些分窗、词时间和剪辑映射支持保留该重复，以及是否仍有异常",
+    "reviewer": {"kind": "agent", "method": "machine_evidence_review", "recorded_at": "实际时间", "quote": "代理对本警报机器证据的实际审查摘要"},
+    "evidence": [{"path": "machine_verification.json", "sha256": "实际证据文件SHA256", "kind": "machine_verification"}]
   }],
   "check_resolutions": []
 }
 ```
 
-`check_resolutions` 用于机器未验证的检查：每项包含 `check_id`、`outcome: verified`、实际完整覆盖 `coverage: {scope: full_media, start: 0, end: 实际时长}`，以及同样的 assessment、reviewer、evidence。仅有 ASR 文本不算耳听。具备真实音频能力的代理可用 `kind: agent`、`method: agent_audio_listening` / `agent_av_review` 和对应 `capability: audio_listening` / `audio_video_review` 记录实际结果，不能虚构能力。
+`check_resolutions` 用于有新机器证据可补核的未验证检查：每项包含 `check_id`、`outcome: verified`、实际完整覆盖 `coverage: {scope: full_media, start: 0, end: 实际时长}`，以及同样的 `assessment/reviewer/evidence`。新记录使用 `kind: agent`、`method: machine_evidence_review`，包含 `recorded_at/quote`，至少一项 `kind: machine_verification` 证据带真实 `path/sha256`。证据须说明本检查的具体范围和结论，不把一份无对应关系的 ASR 文本当万能证明。旧的真实用户或代理听校记录可兼容保留；没有实际听校时不能伪造 `user_listening`、`agent_audio_listening`、`agent_av_review` 或音频 `capability`，也不要求为了推进补做听校。
 
-`fixed` 不能关闭旧媒体上的警报；修改媒体后必须重新生成残留报告。未解决警报一条也不能用补核记录绕过。校验器只验证结构与证据一致性，不认证听懂声音。见 [原音复核流程](speech-review.md)。
+`fixed` 不能关闭旧媒体上的警报；修改媒体后必须重新生成残留报告。未解决警报一条也不能用补核记录绕过。校验器只验证结构与证据一致性，不认证听懂声音，也不让静态结构检查冒充语音质量判断。见 [语音证据复核流程](speech-review.md)。

@@ -21,6 +21,7 @@ class ReviewPipelineTests(unittest.TestCase):
         self.args=argparse.Namespace(source=self.source,output_dir=self.output,stage='residual-check',
             model='not-loaded',cpu_threads=1,window=[],candidates=None,feedback=None,reference_source=None,reference_window=[])
         self.calls=[]
+        self.lineage={'status':'unavailable','reason':'synthetic no lineage'}
 
     def decode(self,window):
         self.calls.append(window)
@@ -44,7 +45,7 @@ class ReviewPipelineTests(unittest.TestCase):
              patch.object(pipeline,'extract_audio',side_effect=self.extract),patch.object(pipeline,'OpeningDecoder',return_value=self.decode), \
              patch.object(pipeline,'opening_audit',side_effect=self.opening) as opening, \
              patch.object(pipeline,'run',return_value=SimpleNamespace(stderr='',stdout='')), \
-             patch.object(pipeline,'propagate_analysis_alerts',return_value=([],{'status':'unavailable','reason':'synthetic no lineage'})), \
+             patch.object(pipeline,'propagate_analysis_alerts',return_value=([],self.lineage)), \
              redirect_stdout(io.StringIO()):
             result=pipeline.review_stage(self.args)
         return result,json.loads((self.output/'review-report.json').read_text(encoding="utf-8")),opening
@@ -56,8 +57,33 @@ class ReviewPipelineTests(unittest.TestCase):
         self.assertEqual(report['quality_status'],'unverified')
         self.assertEqual(report['alerts'],[])
         self.assertEqual(report['checks']['word_integrity']['status'],'unavailable')
+        self.assertIn('source-to-output boundary mapping unavailable',report['checks']['word_integrity']['reason'])
         opening.assert_called_once()
         self.assertEqual(opening.call_args.args[4][0]['word'],'我')
+
+    def test_machine_timing_execution_does_not_require_hearing_or_claim_quality_pass(self):
+        self.lineage={'status':'executed','reason':'synthetic verified mapping'}
+        _,report,_=self.run_stage()
+        check=report['checks']['word_integrity']
+        self.assertEqual(check['status'],'executed')
+        self.assertEqual(check['result'],'unverified')
+        self.assertEqual(check['machine_scope']['usable_words'],2)
+        self.assertEqual(check['machine_scope']['completed_timing_windows'],1)
+        self.assertEqual(check['machine_scope']['source_mapping_status'],'executed')
+        self.assertIs(check['optional_listening']['required'],False)
+        self.assertEqual(check['optional_listening']['status'],'not_performed')
+        self.assertEqual(report['quality_status'],'unverified')
+        self.assertEqual(report['semantic_completeness'],'not verified')
+
+    def test_empty_asr_is_not_usable_word_integrity_evidence(self):
+        self.lineage={'status':'executed'}
+        self.decode=lambda _: {'segments':[]}
+        _,report,_=self.run_stage()
+        check=report['checks']['word_integrity']
+        self.assertEqual(check['status'],'unavailable')
+        self.assertEqual(check['machine_scope']['usable_words'],0)
+        self.assertIn('no usable word timing evidence',check['reason'])
+        self.assertEqual(report['quality_status'],'unverified')
 
     def test_user_window_adds_overlap_and_stays_local_not_full_coverage(self):
         _,report,_=self.run_stage(stage='local-review',window=['2:2.6'])
@@ -65,6 +91,8 @@ class ReviewPipelineTests(unittest.TestCase):
         self.assertTrue(any(x['start']<2 and x['end']>2.6 for x in self.calls))
         self.assertEqual(report['stage'],'local-review')
         self.assertNotEqual(report['checks']['repeated_speech']['coverage']['scope'],'full_media')
+        self.assertEqual(report['checks']['word_integrity']['status'],'executed')
+        self.assertEqual(report['checks']['word_integrity']['coverage']['scope'],'local_windows')
 
     def test_feedback_cannot_be_closed_without_original_reference(self):
         with self.assertRaisesRegex(SystemExit,'reference-source'):
@@ -81,6 +109,7 @@ class ReviewPipelineTests(unittest.TestCase):
         self.assertTrue(any(x['kind']=='user_feedback' and x['review_required'] for x in report['alerts']))
 
     def test_zero_duration_word_preserves_nine_normal_words_and_raw_output(self):
+        self.lineage={'status':'executed'}
         words=[{'word':char,'start':i*.2,'end':i*.2+.15} for i,char in enumerate('不知道这个玩法图片')]
         self.assertEqual(len(words),9)
         words.append({'word':'上','start':2.48,'end':2.48})
@@ -95,6 +124,10 @@ class ReviewPipelineTests(unittest.TestCase):
         self.assertFalse(issue['usable_for_subtitle_timing'])
         self.assertEqual(window['status'],'unavailable')
         self.assertEqual(report['quality_status'],'review_required')
+        check=report['checks']['word_integrity']
+        self.assertEqual(check['status'],'unavailable')
+        self.assertEqual(check['result'],'review_required')
+        self.assertEqual(check['machine_scope']['timing_unverified_words'],1)
         warning=next(x for x in report['alerts'] if x.get('evidence',{}).get('timing_status')=='timing_unverified')
         self.assertEqual((warning['start'],warning['end']),(0.,5.))
         self.assertEqual(warning['scope_type'],'review_window_not_word_boundary')
@@ -128,6 +161,8 @@ class ReviewPipelineTests(unittest.TestCase):
         _,report,_=self.run_stage()
         self.assertEqual(report['windows'][0]['status'],'unavailable')
         self.assertEqual(report['checks']['repeated_speech']['status'],'unavailable')
+        self.assertEqual(report['checks']['word_integrity']['status'],'unavailable')
+        self.assertIn('ASR windows failed',report['checks']['word_integrity']['reason'])
         self.assertEqual(report['quality_status'],'unverified')
 
 

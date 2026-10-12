@@ -57,6 +57,36 @@ class StageGateTests(unittest.TestCase):
         self.data["residual_review"]["report"]["sha256"] = file_hash(self.residual_path)
         self.assertTrue(any("unresolved review_required" in e for e in self.check()))
 
+    def machine_resolution(self):
+        self.residual_data['alerts'] = [{'id': 'synthetic-machine-alert', 'check_id': 'repeated_speech',
+                                        'start': .2, 'end': .4, 'review_required': True}]
+        self.residual_data['quality_status'] = 'review_required'
+        self.residual_data['checks']['repeated_speech']['result'] = 'review_required'
+        self.residual_path.write_text(json.dumps(self.residual_data), encoding='utf-8')
+        self.data['residual_review']['report']['sha256'] = file_hash(self.residual_path)
+        resolution = self.root / 'machine-resolutions.json'
+        resolution.write_text(json.dumps({
+            'schema_version': 1, 'report_sha256': file_hash(self.residual_path),
+            'source_sha256': file_hash(self.source), 'check_resolutions': [], 'alerts': [{
+                'alert_id': 'synthetic-machine-alert', 'outcome': 'false_positive',
+                'assessment': 'Synthetic machine timing comparison; no listening claim.',
+                'reviewer': {'kind': 'agent', 'method': 'machine_evidence_review',
+                             'recorded_at': 'synthetic time', 'quote': 'Synthetic review fixture.'},
+                'evidence': [{'path': 'evidence.txt', 'sha256': file_hash(self.root / 'evidence.txt'),
+                              'kind': 'machine_verification'}]}]}), encoding='utf-8')
+        self.data['residual_review']['resolutions'] = {'path': resolution.name, 'sha256': file_hash(resolution)}
+        return resolution
+
+    def test_semi_auto_machine_resolution_needs_no_listening_capability(self):
+        self.machine_resolution()
+        self.data['user_approval']['message'] = 'Synthetic stage continuation confirmation, not a listening assertion.'
+        self.assertEqual(self.check(), [])
+
+    def test_machine_resolution_evidence_change_still_blocks(self):
+        self.machine_resolution()
+        (self.root / 'evidence.txt').write_text('changed synthetic evidence', encoding='utf-8')
+        self.assertTrue(any('evidence changed' in e for e in self.check()))
+
     def test_changed_residual_reference_blocks(self):
         self.residual_path.write_text(self.residual_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
         self.assertTrue(any("report changed" in e for e in self.check()))

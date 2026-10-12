@@ -1,6 +1,6 @@
 # 全自动与半自动
 
-模式决定由谁批准阶段推进，不降低质检要求，也不改变原片只读、版本绑定和项目隔离。Skill 由宿主 Agent 调用现有媒体入口连续执行；不是一个脱离 Agent 自行运行的后台剪辑服务。
+模式决定由谁批准阶段推进，不改变原片只读、版本绑定和项目隔离。v2.2.2 起两种模式都以机器证据质检推进，不要求代理具备实际听音频能力，也不把用户听校设为额外门槛。Skill 由宿主 Agent 调用现有媒体入口连续执行；不是一个脱离 Agent 自行运行的后台剪辑服务。
 
 ## 首次选择
 
@@ -33,7 +33,7 @@
 
 半自动以阶段质检和用户对具体版本的确认推进。全自动以有效的一次授权和当前版本 AI 质检推进，不逐阶段问是否继续；阶段报告使用 `ai_review`，不得伪填 `user_approval`。实际检查仍有方法、覆盖范围、产物 hash、证据和未决项，不能用任务退出码或零候选代替。
 
-重说证据充分时按已选策略处理；局部疑点有限复查，拿不准的删除边界优先保留完整发音。正常叠词/强调不机械删除。保留后仍需如实评估，不把所有警报一律改为 false_positive。没有实际音频感知能力时，ASR 文本不能冒充耳听；缺少必要证据或工具时报告具体阻塞和现有成果，不制造通过记录，不以补签人工批准掩盖技术失败。
+重说证据充分时按已选策略处理；局部疑点用独立分窗转写、词时间、声学活动和剪辑映射有限复查，拿不准的删除边界优先保留完整发音。正常叠词/强调不机械删除。保留后仍需逐项评估，不把所有警报一律改为 false_positive。缺少实际听音频能力单列为 `not_required`，不因此停止机器检查或要求用户补听。真实检测失败、必要机器证据缺失或警报未处理仍须报告并修复，不以静态结构、补签批准或伪造听校记录代替语音证据。
 
 每次改动后检查受影响范围，旧版本报告不能签验新版。进度说明不要求用户回复，不持续发送隐含确认问题。两种模式全部制作和检查完成后，都以可编辑剪映工程文件为最终交付，给出完整工程目录、所需素材、工程名、导入结果与简短检查说明，等待用户最终反馈。完整 MP4 与 SRT/ASS 按原阶段要求制作、检查和保留，供预览及工程构建使用，不替代最终工程。
 
@@ -47,7 +47,7 @@
 
 用户要求暂停时先停止本任务后续动作，安全收尾正在写入的文件并记录暂停；改半自动后恢复阶段确认。不能仅靠新消息中的“继续”重新激活已撤销授权。原片、约定设置或选项改变使旧授权失效，记录变更并取得相应新授权后再自动执行；恢复前复核模式、运行编号、原片和设置，而非只凭缓存或上一轮口头结论。
 
-能力缺失、已定位的失败或未解决的质量问题不能被模式绕过；报告具体阻塞即可，不无休止重试。文件与真实用户消息留在本机项目，不进入公开仓库。
+必要机器工具或剪映导入能力缺失、已定位的失败或未解决的质量问题不能被模式绕过；报告具体阻塞即可，不无休止重试。实际听音频能力不属于开工或推进前提。文件与真实用户消息留在本机项目，不进入公开仓库。
 
 ## 脚本与报告协议
 
@@ -69,8 +69,7 @@ CHOICES 的必需键为 `retake_policy`（none/last_complete）、`font_name`、
   "ai_review": {
     "status": "passed",
     "reviewer_id": "实际审查者任务标识",
-    "method": "agent_av_review",
-    "capability": "audio_video_review",
+    "method": "combined_evidence_review",
     "evidence": [{"path": "实际检查记录路径", "sha256": "实际证据哈希"}],
     "artifacts": {"source": {"sha256": "当前实际输入哈希"}},
     "covered_checks": ["该阶段全部真实已完成检查ID"]
@@ -78,10 +77,15 @@ CHOICES 的必需键为 `retake_policy`（none/last_complete）、`font_name`、
 }
 ```
 
-示例不是通过模板：音频阶段必须实际具备 `agent_audio_listening/audio_listening` 或 `agent_av_review/audio_video_review` 能力并使用它；原有警报处理与版本检查仍执行。`jianying-basic` 的静态质检可用 `structural_review`；不能把它写成真实听校或导入结果。
+示例不是通过模板：阶段 `ai_review.method` 默认使用 `combined_evidence_review` 或 `machine_evidence_review`，不要求音频 `capability`。必须实际核对机器转写、词时间、声学边界、覆盖、剪辑谱系和相应产物，原有警报处理、版本与授权检查仍执行。`word_integrity` 的通过范围是机器词时间有效性、边界保护、覆盖和谱系一致性，不保证真实完整音素或听感。实际听校单列 `not_required`，不向必需机器检查填入由“没听过”造成的 `unavailable/unverified`。旧的真实听校记录可兼容保留，但不能虚构听校能力或经历。`jianying-basic` 的静态质检可用 `structural_review`；它不能替代语音机器质检或剪映实际导入证据。
+
+警报 resolution 由代理根据实际机器证据填写：`reviewer` 含 `kind: agent`、`method: machine_evidence_review`、`recorded_at` 与 `quote`；`assessment` 给出该警报的具体结论，`evidence` 至少有一项 `kind: machine_verification` 且带真实 `path/sha256`。不能仅写“机器通过”或重复警报标题。结构示例见 [阶段报告](stage-gates.md#粗剪警报闭环v210-起)。
 
 全自动粗剪入口额外要求 `--decision-report` 指向 analysis 报告。其 `execution` 精确记录实际 `fps`（未指定为 null）、`confirmed_delete` 数组、`approve_candidate` 数组和 `decision_file_sha256`（无 CSV 为 null）；`artifacts/ai_review.artifacts` 绑定 source、有 CSV 时的 decisions、以及所选 CSV 行引用的 `acoustic_0000` 等声学证据（四位下标为 CSV 数据行的零基索引）。可用 `run_pipeline.decision_review_inputs(args)` 获取需绑定路径。声学证据或命令变更后需重新检查，不用旧方案直接执行。
 
 字幕与蒙版报告保留 `source_provenance.edit_map: {path, sha256}`，将当前精剪 source 与授权原片关联；它们复用同一份实际 edit-map，不重建来源。各生产入口始终传当前 `--project-config`，不能指向活动配置的历史副本绕过暂停。全自动固定选项不可用 CLI 悄悄覆盖，未固定的逐条取景由 AI 检查确定。
 
 产物登记后用 `review-artifact --project PROJECT --artifact-id ID --report REPORT --inputs-file INPUTS.json` 记录 `ai_reviewed`；INPUTS 将阶段输入键映射到真实路径。它支持全自动上游依赖，不写人工 approval。工程内冻结授权、用户消息、AI 证据与剪辑映射，供离线静态核验；冻结副本不能恢复自动制作，仍需当前活动项目授权。最终成功导入的简短操作记录留在项目中，不要求导出视频。
+
+
+升级旧项目时保留已有素材、设置和有效缓存。旧记录若声称听校却缺少对应能力或 listening_confirmation 证据，不补造这些字段；针对受影响范围重新完成机器证据审查，生成新版报告及哈希引用，使用上述机器方法。检测未变且证据仍有效的部分可复用，不因更新 Skill 自动重剪全片。

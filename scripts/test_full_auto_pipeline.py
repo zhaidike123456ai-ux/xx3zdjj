@@ -1,4 +1,4 @@
-"""Actual synthetic media plumbing; AI/listening evidence is simulated, never real QA."""
+"""Synthetic media plumbing with machine-only review fixtures; no listening capability."""
 import copy
 import json
 import os
@@ -20,7 +20,7 @@ class FullAutoPipelineTests(unittest.TestCase):
         self.h=fixtures.AnalysisToCaptionsTests('runTest');self.h.setUp();self.addCleanup(self.h.doCleanups)
         self.root=self.h.root
         self.evidence=self.root/'synthetic_ai_review.txt'
-        self.evidence.write_text('SYNTHETIC AI audiovisual review fixture; no real speech was heard.',encoding='utf-8')
+        self.evidence.write_text('SYNTHETIC machine review fixture for timing, coverage and provenance; no listening performed.',encoding='utf-8')
         self.authorization_message=self.root/'synthetic_user_authorization.txt'
         self.authorization_message.write_text('SYNTHETIC user selected full_auto and these settings; not real user approval.',encoding='utf-8')
         self.background=Path(__file__).resolve().parent.parent/'assets/default-background.jpg'
@@ -51,8 +51,8 @@ class FullAutoPipelineTests(unittest.TestCase):
         if stage in ('captions','preview'):
             mapping=self.h.rough/'edit-map.json'
             report['source_provenance']={'edit_map':{'path':str(mapping),'sha256':pipeline.sha256(mapping)}}
-        report['ai_review']={'status':'passed','reviewer_id':'synthetic_independent_reviewer','method':'agent_av_review',
-            'capability':'audio_video_review','evidence':[{'path':str(self.evidence),'sha256':pipeline.sha256(self.evidence)}],
+        report['ai_review']={'status':'passed','reviewer_id':'synthetic_independent_reviewer','method':'machine_evidence_review',
+            'evidence':[{'kind':'machine_verification','path':str(self.evidence),'sha256':pipeline.sha256(self.evidence)}],
             'artifacts':copy.deepcopy(report['artifacts']),'covered_checks':list(CHECKS[stage])}
         fixtures.write_json(path,report);return report
 
@@ -72,12 +72,15 @@ class FullAutoPipelineTests(unittest.TestCase):
         self.h.review=fixtures.read_json(self.h.residual/'review-report.json')
         old,resolutions,_=self.h.protocol_evidence()
         for item in resolutions['alerts']+resolutions['check_resolutions']:
-            item['reviewer'].update(kind='agent',method='agent_av_review',capability='audio_video_review')
+            item['reviewer']={'kind':'agent','method':'machine_evidence_review','recorded_at':'synthetic',
+                              'quote':'Synthetic fixture: machine timing, coverage and lineage records checked.'}
+            item['assessment']='Synthetic protocol fixture: machine evidence accounts for this alert or check; no listening claim.'
+            item['evidence']=[{'kind':'machine_verification','path':str(self.evidence),'sha256':pipeline.sha256(self.evidence)}]
         fixtures.write_json(self.h.resolutions,resolutions)
         residual=old['residual_review'];residual['resolutions']['sha256']=pipeline.sha256(self.h.resolutions)
         self.gate('rough-cut',{'source':self.h.media},self.h.gate,residual_review=residual)
 
-    def test_full_auto_analysis_to_native_project_without_stage_user_approvals(self):
+    def test_full_auto_to_native_project_without_listening_or_stage_user_approvals(self):
         self.prepare_rough()
         captions=self.root/'captions'
         code,text=self.h.invoke_main('captions','--source',self.h.media,'--script',self.h.script,

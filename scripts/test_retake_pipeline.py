@@ -139,6 +139,20 @@ class AnalysisIntegrationTests(unittest.TestCase):
         self.assertEqual(report['command_status'],'completed')
         self.assertEqual(report['quality_status'],'unverified')
         self.assertEqual(report['checks']['word_integrity']['result'],'unverified')
+        self.assertEqual(report['checks']['word_integrity']['status'],'executed')
+        self.assertEqual(report['checks']['word_integrity']['machine_scope']['usable_words'],2)
+        self.assertIs(report['checks']['word_integrity']['optional_listening']['required'],False)
+
+    def test_bad_word_times_remain_unavailable_with_tracked_alerts(self):
+        self.analyze([word('如果',.1,.3),word('人物',.3,.3)],opening={'status':'executed','reason':'mock complete opening','alerts':[],'windows':[],'plan':{}})
+        report=json.loads((self.out/'review-report.json').read_text(encoding='utf-8'))
+        check=report['checks']['word_integrity']
+        self.assertEqual(check['status'],'unavailable')
+        self.assertEqual(check['result'],'review_required')
+        self.assertEqual(check['machine_scope']['usable_words'],1)
+        self.assertEqual(check['machine_scope']['timing_unverified_words'],1)
+        self.assertTrue(any(x.get('evidence',{}).get('timing_status')=='timing_unverified' for x in report['alerts']))
+        self.assertEqual(report['quality_status'],'review_required')
 
     def test_opening_unavailable_stays_explicit_unverified(self):
         self.analyze([word('如果',.1,.3)],opening={'status':'unavailable','reason':'decoder unavailable fixture','coverage':{},'alerts':[],'windows':[],'plan':{}})
@@ -146,6 +160,8 @@ class AnalysisIntegrationTests(unittest.TestCase):
         self.assertEqual(report['detection_checks']['opening_overlap']['status'],'unavailable')
         self.assertIn('decoder unavailable',report['detection_checks']['opening_overlap']['reason'])
         self.assertEqual(report['quality_status'],'unverified')
+        self.assertEqual(report['checks']['word_integrity']['status'],'unavailable')
+        self.assertIn('effective opening review incomplete',report['checks']['word_integrity']['reason'])
 
     def test_opening_short_activity_is_reviewed_even_if_global_asr_merged_it(self):
         self.out.mkdir()

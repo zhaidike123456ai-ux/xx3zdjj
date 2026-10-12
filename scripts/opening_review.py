@@ -367,7 +367,7 @@ def execute_opening_review(plan, asr_callback=None, *, max_retries=0):
     status='executed' if all_completed else ('unavailable' if windows else 'skipped')
     if not windows:reason=plan.get('reason','no planned windows')
     elif asr_callback is None:reason='no local ASR callback; acoustic planning only'
-    elif all_completed:reason='independent overlapping local decodes completed; listening still required'
+    elif all_completed:reason='independent overlapping local decodes completed; assess machine evidence and unresolved alerts'
     else:reason='one or more scheduled windows or opening regions lack complete local decoding; retained evidence requires review'
     return {'status':status,'reason':reason,'windows':reports,'coverage':covered,
             'planned_coverage':plan.get('coverage',coverage(target,windows)),
@@ -377,4 +377,4 @@ def execute_opening_review(plan, asr_callback=None, *, max_retries=0):
             'retry_limit':max_retries,'retry_windows':retries,'retried_windows':len(retries),
             'successful_retries':sum(x['status']=='executed' for x in retries),
             'retry_resolution':'supplemental evidence only; original failures remain unresolved',
-            'human_listening':'not performed','speech_completeness':'not verified','deletion_authorized':False}
+            'human_listening':'not performed','listening_requirement':'not_required','speech_completeness':'not verified','deletion_authorized':False}

@@ -97,7 +97,71 @@ class ReviewStateTests(unittest.TestCase):
                                                     'recorded_at': 'fixture timestamp'}
         self.assertEqual(self.check(), [])
         self.resolutions['alerts'][0]['reviewer']['method'] = 'asr_transcript_only'
-        self.assertTrue(any('ASR alone' in e for e in self.check()))
+        self.assertTrue(any('not listening' in e for e in self.check()))
+
+    def machine_resolution(self):
+        self.resolve_alert('false_positive')
+        item = self.resolutions['alerts'][0]
+        item['reviewer'] = {'kind': 'agent', 'method': 'machine_evidence_review',
+                            'recorded_at': 'synthetic fixture timestamp',
+                            'quote': 'Synthetic ASR/timing comparison, not actual listening.'}
+        item['assessment'] = 'Synthetic machine evidence supports normal repetition in the flagged range.'
+        item['evidence'] = [{'kind': 'machine_verification', 'path': self.confirmation.name,
+                             'sha256': file_hash(self.confirmation)}]
+        return item
+
+    def test_machine_evidence_can_resolve_without_listening_capability(self):
+        item = self.machine_resolution()
+        self.assertNotIn('capability', item['reviewer'])
+        self.assertEqual(self.check(), [])
+        self.assertIn('not performed', self.report['human_listening'])
+
+    def test_machine_evidence_must_be_hashed_current_and_typed(self):
+        item = self.machine_resolution()
+        item['evidence'][0]['kind'] = 'local_audio'
+        self.assertTrue(any('machine_verification' in e for e in self.check()))
+        item['evidence'][0]['kind'] = 'machine_verification'
+        item['evidence'][0]['sha256'] = '0' * 64
+        self.assertTrue(any('evidence changed' in e for e in self.check()))
+        item['evidence'][0]['sha256'] = file_hash(self.confirmation)
+        self.confirmation.unlink()
+        self.assertTrue(any('evidence file missing' in e for e in self.check()))
+
+    def test_machine_review_cannot_be_relabelled_as_listening(self):
+        item = self.machine_resolution()
+        item['evidence'][0]['kind'] = 'listening_confirmation'
+        self.assertTrue(any('cannot label' in e for e in self.check()))
+        item['evidence'][0]['kind'] = 'machine_verification'
+        item['human_listening_performed'] = True
+        self.assertTrue(any('cannot claim performed' in e for e in self.check()))
+
+    def test_machine_reviewer_still_needs_assessment_time_and_statement(self):
+        item = self.machine_resolution()
+        item['assessment'] = ''
+        self.assertTrue(any('assessment' in e for e in self.check()))
+        item['assessment'] = 'synthetic assessment'
+        item['reviewer']['quote'] = ''
+        self.assertTrue(any('time and statement' in e for e in self.check()))
+
+    def test_unavailable_requires_evidenced_machine_full_media_supplement(self):
+        item = self.machine_resolution()
+        self.report['checks']['word_integrity'].update(status='unavailable', result='unverified',
+                                                      reason='synthetic technical check was unavailable')
+        self.save()
+        self.resolutions['report_sha256'] = file_hash(self.report_path)
+        self.assertTrue(any('unverified' in e for e in self.check()))
+        self.resolutions['check_resolutions'] = [{
+            'check_id': 'word_integrity', 'outcome': 'verified', 'coverage': full_coverage(2),
+            'assessment': 'Synthetic full-media machine timing comparison, not phoneme listening.',
+            'reviewer': dict(item['reviewer']), 'evidence': list(item['evidence'])}]
+        self.assertEqual(self.check(), [])
+        self.resolutions['check_resolutions'][0]['coverage']['end'] = 1
+        self.assertTrue(any('full-media coverage' in e for e in self.check()))
+
+    def test_unresolved_real_alert_not_cleared_by_machine_check_supplement(self):
+        self.machine_resolution()
+        self.resolutions['alerts'] = []
+        self.assertTrue(any('unresolved review_required' in e for e in self.check()))
 
     def test_explanation_without_evidence_does_not_resolve(self):
         self.resolve_alert()

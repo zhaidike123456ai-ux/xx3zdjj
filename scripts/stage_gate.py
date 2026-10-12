@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from review_state import validate_review
-from workflow_mode import resolve_workflow, validate_ai_review
+from workflow_mode import AUDIO_METHODS, resolve_workflow, validate_ai_review
 
 
 CHECKS = {
@@ -103,7 +103,11 @@ def validate_report(report_path, expected_stage, inputs, project_config=None, *,
             if "user_approval" in report:
                 errors.append("full_auto must use AI review, not a stage user_approval field")
             errors.extend(validate_ai_review(report, inputs, CHECKS[expected_stage], report_path.parent,
-                                            require_audio=expected_stage not in ("jianying-basic",)))
+                                            require_audio=False))
+            if expected_stage != "jianying-basic":
+                review_method = report.get("ai_review", {}).get("method")
+                if review_method not in ("combined_evidence_review", "machine_evidence_review", *AUDIO_METHODS):
+                    errors.append("media stages require a speech-evidence AI assessment; static structure alone is insufficient")
             if normalized_stage == "analysis":
                 auth = context.get("authorization") or {}
                 authorized = {item.get("sha256") for item in auth.get("sources", []) if isinstance(item, dict)}

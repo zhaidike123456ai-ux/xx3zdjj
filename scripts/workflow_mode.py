@@ -12,7 +12,7 @@ REQUIRED_CHOICES = ('retake_policy', 'font_name', 'mask_shape', 'background',
                     'background_motion', 'delivery')
 AUDIO_METHODS = {'agent_audio_listening': 'audio_listening',
                  'agent_av_review': 'audio_video_review'}
-STATIC_METHODS = {'static_inspection', 'combined_evidence_review', 'structural_review'}
+STATIC_METHODS = {'static_inspection', 'combined_evidence_review', 'structural_review', 'machine_evidence_review'}
 
 
 def file_hash(path):
@@ -278,12 +278,25 @@ def validate_ai_review(report, inputs, covered_checks, base, *, require_audio=Fa
             errors.append('AI review requires actual audio-listening capability; ASR alone is insufficient')
     elif method not in set(AUDIO_METHODS) | STATIC_METHODS:
         errors.append('AI review method is missing or unsupported')
+    if method in AUDIO_METHODS and review.get('capability') != AUDIO_METHODS[method]:
+        errors.append('AI listening claim requires matching actual capability')
     evidence = review.get('evidence')
     if not isinstance(evidence, list) or not evidence:
         errors.append('AI review needs hashed evidence')
     else:
         for item in evidence:
             _check_ref(item, base, 'AI review evidence', errors)
+    evidence_kinds = {item.get('kind') for item in evidence if isinstance(item, dict) and isinstance(item.get('kind'), str)} if isinstance(evidence, list) else set()
+    if method in AUDIO_METHODS and 'listening_confirmation' not in evidence_kinds:
+        errors.append('AI listening claim requires hashed listening_confirmation evidence')
+    if method == 'machine_evidence_review' and 'machine_verification' not in evidence_kinds:
+        errors.append('AI machine review requires hashed machine_verification evidence')
+    if method in STATIC_METHODS:
+        from review_state import listening_claim_errors
+        errors.extend(listening_claim_errors(review))
+        errors.extend(listening_claim_errors(report))
+        if 'listening_confirmation' in evidence_kinds:
+            errors.append('machine/static AI review cannot label evidence as listening_confirmation')
     covered = review.get('covered_checks')
     if not isinstance(covered, list) or not all(key in covered for key in covered_checks):
         errors.append('AI review does not cover every required check')

@@ -55,8 +55,8 @@ class WorkflowModeTests(unittest.TestCase):
                            for key in CHECKS[stage]},
                 'blocking_counts': dict(approved_not_executed=0, known_unfixed=0, unresolved=0),
                 'ai_review': {'status': 'passed', 'reviewer_id': 'synthetic-reviewer',
-                              'method': 'agent_av_review', 'capability': 'audio_video_review',
-                              'evidence': [{'path': str(self.qa), 'sha256': file_hash(self.qa)}],
+                              'method': 'combined_evidence_review',
+                              'evidence': [{'path': str(self.qa), 'sha256': file_hash(self.qa), 'kind': 'machine_verification'}],
                               'artifacts': {'source': {'sha256': file_hash(self.source)}},
                               'covered_checks': list(CHECKS[stage])}}
 
@@ -190,13 +190,53 @@ class WorkflowModeTests(unittest.TestCase):
         self.report.pop('ai_review')
         self.assertTrue(self.gate())
 
-    def test_static_or_asr_only_cannot_pass_audio_stages(self):
-        for method in ('asr_only', 'static_inspection', 'combined_evidence_review'):
+    def test_machine_review_passes_without_audio_capability(self):
+        for method in ('combined_evidence_review', 'machine_evidence_review'):
             self.report['ai_review']['method'] = method
-            self.assertTrue(self.gate())
+            self.assertNotIn('capability', self.report['ai_review'])
+            self.assertEqual(self.gate(), [])
+        self.report['ai_review']['method'] = 'asr_only'
+        self.assertTrue(self.gate())  # Unsupported QA record, not lack of ears.
 
-    def test_agent_audio_review_requires_matching_capability(self):
-        self.report['ai_review']['capability'] = 'audio_listening'
+    def test_all_media_stages_reject_static_but_allow_machine_assessment(self):
+        from review_state import REQUIRED_CHECKS, full_coverage, make_report
+        residual = make_report(self.source, 1.0, {
+            key: {'status': 'executed', 'result': 'passed', 'method': 'synthetic machine fixture',
+                  'coverage': full_coverage(1.0)} for key in REQUIRED_CHECKS}, [])
+        residual['source_review_lineage'] = self.bound_lineage(self.source, self.source)
+        residual_path = self.root / 'media_stage_residual.json'
+        self.write(residual_path, residual)
+        for stage in ('analysis', 'analyze', 'rough-cut', 'captions', 'preview'):
+            with self.subTest(stage=stage):
+                self.report = self.make_report(stage)
+                if stage == 'rough-cut':
+                    self.report['residual_review'] = {'report': {
+                        'path': str(residual_path), 'sha256': file_hash(residual_path)}}
+                for method in ('static_inspection', 'structural_review'):
+                    self.report['ai_review']['method'] = method
+                    self.assertTrue(any('static structure alone' in e for e in self.gate(stage)))
+                for method in ('combined_evidence_review', 'machine_evidence_review'):
+                    self.report['ai_review']['method'] = method
+                    self.assertNotIn('capability', self.report['ai_review'])
+                    self.assertEqual(self.gate(stage), [])
+
+    def test_agent_audio_claim_requires_matching_capability_and_confirmation(self):
+        self.report['ai_review'].update(method='agent_av_review', capability='audio_listening')
+        self.assertTrue(self.gate())
+        self.report['ai_review']['capability'] = 'audio_video_review'
+        self.assertTrue(self.gate())  # A listening method cannot borrow machine evidence.
+        self.report['ai_review']['evidence'][0]['kind'] = 'listening_confirmation'
+        self.assertEqual(self.gate(), [])  # Synthetic legacy record, no actual listening claim.
+
+    def test_machine_review_cannot_fake_listening_or_skip_typed_evidence(self):
+        self.report['ai_review']['method'] = 'machine_evidence_review'
+        self.report['ai_review']['evidence'][0].pop('kind')
+        self.assertTrue(self.gate())
+        self.report['ai_review']['evidence'][0]['kind'] = 'machine_verification'
+        self.report['ai_review']['human_listening_performed'] = True
+        self.assertTrue(self.gate())
+        self.report['ai_review'].pop('human_listening_performed')
+        self.report['ai_review']['evidence'][0]['kind'] = 'listening_confirmation'
         self.assertTrue(self.gate())
 
     def test_ai_evidence_and_coverage_and_artifact_are_bound(self):
@@ -238,7 +278,7 @@ class WorkflowModeTests(unittest.TestCase):
     def test_native_basic_static_check_does_not_require_deep_ui(self):
         self.report = self.make_report('jianying-basic')
         self.report['ai_review']['method'] = 'static_inspection'
-        self.report['ai_review'].pop('capability')
+        self.report['ai_review'].pop('capability', None)
         self.assertEqual(self.gate('jianying-basic'), [])
 
     def test_semi_auto_native_basic_has_no_additional_user_approval(self):

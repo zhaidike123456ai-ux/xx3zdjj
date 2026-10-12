@@ -12,7 +12,7 @@ test skips. Supplied but incomplete/mismatched fixture configuration fails.
 Only planned opening windows run; one decoder/model is shared. No automatic cut.
 Timing-only anomalies may leave a window incomplete, but must retain the raw
 transcript, its valid words and an explicit review alert. Real decoder exceptions
-still fail this regression. This does not waive listening or the quality gate.
+still fail this regression. This does not waive machine-evidence review or quality gates.
 """
 import argparse
 import json

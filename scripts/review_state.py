@@ -1,8 +1,9 @@
 """Version-bound review state. A completed command is not a quality approval.
 
 Reports/resolutions are local evidence records, not proof of actual human hearing.
-Callers must only record actual user listening statements or actual capable-agent
-listening observations; synthetic fixtures never authorize real media. Evidence
+Callers must record actual machine-evidence assessments, user statements, or
+capable-agent listening observations without relabeling machine checks as hearing.
+Synthetic fixtures never authorize real media. Evidence
 cannot be replaced by an explanation or a zero count.
 """
 import hashlib
@@ -84,11 +85,12 @@ def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def evidence_errors(evidence, base, require_listening=False):
+def evidence_errors(evidence, base, require_listening=False, require_machine=False):
     errors = []
     if not isinstance(evidence, list) or not evidence:
         return ['missing hashed evidence']
     confirmation = False
+    machine = False
     for item in evidence:
         if not isinstance(item, dict) or not nonempty(item.get('path')):
             errors.append('invalid evidence object/path')
@@ -97,6 +99,8 @@ def evidence_errors(evidence, base, require_listening=False):
             errors.append('invalid evidence kind')
         if item.get('kind') == 'listening_confirmation':
             confirmation = True
+        if item.get('kind') == 'machine_verification':
+            machine = True
         path = Path(base) / item['path']
         if not path.is_file():
             errors.append('evidence file missing: ' + item['path'])
@@ -104,24 +108,46 @@ def evidence_errors(evidence, base, require_listening=False):
             errors.append('evidence changed or hash missing: ' + item['path'])
     if require_listening and not confirmation:
         errors.append('actual listening confirmation evidence required')
+    if require_machine and not machine:
+        errors.append('hashed machine_verification evidence required')
+    if require_machine and confirmation:
+        errors.append('machine review cannot label evidence as listening_confirmation')
+    return errors
+
+
+def listening_claim_errors(record):
+    """Check explicit structured claims; this is not authentication of free-form prose."""
+    errors = []
+    for key in ('human_listening_performed', 'audio_listening_performed', 'listening_performed'):
+        if record.get(key) is True:
+            errors.append('machine review cannot claim performed listening')
+    value = record.get('human_listening')
+    if value is True or isinstance(value, str) and value.strip().lower().startswith(('performed', 'completed', 'verified', 'passed', '已听', '已完成听')):
+        errors.append('machine review cannot claim performed human listening')
     return errors
 
 
 def human_resolution_errors(item, base):
+    """Legacy public name: accepts honest machine review or evidenced listening."""
     errors = []
     if not nonempty(item.get('assessment')):
         errors.append('missing structured assessment')
     reviewer = item.get('reviewer', {})
+    machine = isinstance(reviewer, dict) and reviewer.get('kind') == 'agent' and reviewer.get('method') == 'machine_evidence_review'
     if not isinstance(reviewer, dict) or reviewer.get('kind') not in ('user', 'agent'):
-        errors.append('resolution needs an actual listening reviewer')
+        errors.append('resolution needs an identified user or agent reviewer')
     elif not all(nonempty(reviewer.get(k)) for k in ('recorded_at', 'quote')):
         errors.append('resolution needs recorded reviewer time and statement')
     elif reviewer['kind'] == 'user' and reviewer.get('method') != 'user_listening':
         errors.append('user resolution needs explicit user_listening method')
-    elif reviewer['kind'] == 'agent' and (reviewer.get('method') not in ('agent_audio_listening', 'agent_av_review') or
-                                         reviewer.get('capability') not in ('audio_listening', 'audio_video_review')):
-        errors.append('agent resolution needs actual audio-listening capability and method; ASR alone is insufficient')
-    errors.extend(evidence_errors(item.get('evidence'), base, require_listening=True))
+    elif reviewer['kind'] == 'agent' and not machine:
+        capabilities = {'agent_audio_listening': 'audio_listening', 'agent_av_review': 'audio_video_review'}
+        if reviewer.get('method') not in capabilities or reviewer.get('capability') != capabilities.get(reviewer.get('method')):
+            errors.append('unsupported agent review method; listening claims need actual matching capability, ASR alone is not listening')
+    if machine:
+        errors.extend(listening_claim_errors(item))
+        errors.extend(listening_claim_errors(reviewer))
+    errors.extend(evidence_errors(item.get('evidence'), base, require_listening=not machine, require_machine=machine))
     return errors
 
 
@@ -238,7 +264,8 @@ def validate_review(report_path, source_path, resolutions_path=None,
 
     `fixed` cannot erase a current-media alert: repair changes the media hash and
     needs a fresh residual report. Retaining a normal repetition/false positive
-    requires a version-bound actual listening conclusion and hashed evidence.
+    requires a version-bound machine assessment or actual listening conclusion
+    and hashed evidence. Listening capability is not required for machine review.
     """
     try:
         report_path, source_path = Path(report_path).resolve(), Path(source_path).resolve()
@@ -361,7 +388,7 @@ def validate_review(report_path, source_path, resolutions_path=None,
                 continue
             supplement = supplements.get(key)
             if not supplement:
-                errors.append(key + ': full-media check coverage/result unverified; needs evidenced user supplement')
+                errors.append(key + ': full-media check coverage/result unverified; needs evidenced review supplement')
                 continue
             if supplement.get('outcome') != 'verified' or not coverage_is_full(supplement.get('coverage'), duration):
                 errors.append(key + ': supplement lacks verified full-media coverage')

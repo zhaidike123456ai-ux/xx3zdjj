@@ -84,9 +84,9 @@ class StudioWorkflowTests(unittest.TestCase):
                                  "evidence":[str(evidence)]} for key in CHECKS[stage]},
                   "blocking_counts":{"approved_not_executed":0,"known_unfixed":0,"unresolved":0},
                   "ai_review":{"status":"passed","reviewer_id":"fixture_reviewer",
-                      "method":"agent_audio_listening","capability":"audio_listening",
+                      "method":"machine_evidence_review",
                       "covered_checks":list(CHECKS[stage]),"artifacts":bindings,
-                      "evidence":[{"path":str(evidence),"sha256":studio.sha(evidence)}]}}
+                      "evidence":[{"kind":"machine_verification","path":str(evidence),"sha256":studio.sha(evidence)}]}}
         if stage in ("captions","preview"):
             mapping=folder/"source_edit_map.json"
             studio.write(mapping,{"source_sha256":studio.sha(self.source),

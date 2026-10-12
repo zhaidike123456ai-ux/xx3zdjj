@@ -318,7 +318,7 @@ def detect_retake_groups(segments: list[dict], policy: str) -> list[dict]:
     rows=[]
     for i,x in enumerate(sorted(selected,key=lambda x:x["first_start"]),1):
         high=policy == "last_complete" and x["similarity"]>=0.82 and x["size"]>=2
-        rows.append({"id":f"RT{i:03d}","first_attempt_start":f"{x['first_start']:.3f}","first_attempt_end":f"{x['first_end']:.3f}","first_attempt_text":x["first_text"],"last_attempt_start":f"{x['last_start']:.3f}","last_attempt_end":f"{x['last_end']:.3f}","last_attempt_text":x["last_text"],"similarity":f"{x['similarity']:.3f}","gap_seconds":f"{x['gap']:.3f}","policy":policy,"decision":"proposed_delete_first_attempt_keep_last_pending_confirmation" if high else "review_range_unclear","proposed_delete_start":f"{x['first_start']:.3f}" if high else "","proposed_delete_end":f"{max(x['first_start'],x['last_start']-0.12):.3f}" if high else "","kept_range":f"{x['last_start']:.3f}-{x['last_end']:.3f}","status":"machine candidate; last attempt completeness requires listening"})
+        rows.append({"id":f"RT{i:03d}","first_attempt_start":f"{x['first_start']:.3f}","first_attempt_end":f"{x['first_end']:.3f}","first_attempt_text":x["first_text"],"last_attempt_start":f"{x['last_start']:.3f}","last_attempt_end":f"{x['last_end']:.3f}","last_attempt_text":x["last_text"],"similarity":f"{x['similarity']:.3f}","gap_seconds":f"{x['gap']:.3f}","policy":policy,"decision":"proposed_delete_first_attempt_keep_last_pending_confirmation" if high else "review_range_unclear","proposed_delete_start":f"{x['first_start']:.3f}" if high else "","proposed_delete_end":f"{max(x['first_start'],x['last_start']-0.12):.3f}" if high else "","kept_range":f"{x['last_start']:.3f}-{x['last_end']:.3f}","status":"machine candidate; last attempt completeness requires an evidenced AI assessment"})
     return rows
 
 
@@ -448,15 +448,37 @@ def opening_audit(source, audio, out, args, words, decoder=None):
         if first['end']-first['start'] <= .65 and 0 <= second['start']-first['end'] <= 1:
             alerts.append({'check_id':'repeated_speech','start':first['start'],'end':second['end'],
                 'kind':'opening_short_activity','text':'', 'review_required':True,
-                'evidence':{'activities':[first,second],'reason':'short initial activity before another onset; could be a syllable, breath, or attempted word; listen and compare overlapping windows; never auto-delete'}})
+                'evidence':{'activities':[first,second],'reason':'short initial activity before another onset; could be a syllable, breath, or attempted word; compare acoustic boundaries and overlapping ASR windows; never auto-delete without an evidenced assessment'}})
     result.update(plan=plan, alerts=alerts)
     if alerts:result['quality_status']='review_required'
     (out/'opening-review.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     return result
 
 
-def review_checks(duration, alerts, opening, full=True):
+def review_checks(duration, alerts, opening, full=True, *, timing_reviews=None, lineage=None):
+    """Describe performed machine checks; optional listening is a separate scope.
+
+    Detector execution is not the final AI assessment. Even with no candidate,
+    the result stays unverified until an evidenced review of the actual media
+    resolves that scope. Missing hearing capability is not a detector failure.
+    """
     coverage = full_coverage(duration) if full else {'scope':'local_windows','start':0,'end':duration}
+    timing_reviews = list(timing_reviews or [])
+    timing_failures = [x for x in timing_reviews if x.get('status') != 'executed' or x.get('timing_unverified')]
+    word_count = sum(len(x.get('words', [])) for x in timing_reviews)
+    unavailable_reasons = []
+    if not timing_reviews:
+        unavailable_reasons.append('no word timing validation was executed')
+    elif timing_failures:
+        unavailable_reasons.append('one or more ASR windows failed or contain unverified word times')
+    elif not word_count:
+        unavailable_reasons.append('ASR supplied no usable word timing evidence')
+    if opening.get('status') != 'executed':
+        unavailable_reasons.append('effective opening review incomplete: '+opening.get('reason','unavailable'))
+    if lineage is not None and full and lineage.get('status') != 'executed':
+        unavailable_reasons.append('source-to-output boundary mapping unavailable: '+lineage.get('reason','unavailable'))
+    optional_listening = {'required':False, 'status':'not_performed',
+        'scope':'subjective hearing and phoneme completeness are not claimed by these machine checks'}
     return {
         'repeated_speech':{'status':'executed' if opening.get('status')=='executed' else 'unavailable',
             'result':'review_required' if any(x['check_id']=='repeated_speech' for x in alerts) else 'unverified',
@@ -466,10 +488,17 @@ def review_checks(duration, alerts, opening, full=True):
             'opening_window_summary':{k:opening.get(k) for k in ('scheduled_windows','completed_windows','failed_windows','temporal_coverage_complete','multiscale_complete','quality_status')}},
         'breath_gaps':{'status':'executed','result':'review_required' if any(x['check_id']=='breath_gaps' for x in alerts) else 'unverified',
             'coverage':coverage,'method':'silencedetect; silence is not breath classification',
-            'reason':'audio listening still required for breathing and intended pacing'},
-        'word_integrity':{'status':'unavailable','result':'unverified','coverage':coverage,
-            'method':'actual listening required; not inferred from ASR agreement or successful decoding',
-            'reason':'this script cannot verify complete phonemes or intended semantic repetition by listening'}
+            'reason':'quiet intervals need evidenced AI assessment of timing and context; silence alone does not classify breath or intended pacing'},
+        'word_integrity':{'status':'unavailable' if unavailable_reasons else 'executed',
+            'result':'review_required' if any(x['check_id']=='word_integrity' for x in alerts) else 'unverified',
+            'coverage':coverage,
+            'method':'ASR word timestamps checked for finite, positive, in-window bounds; opening-window evidence and available source-to-output alert mapping recorded',
+            'machine_scope':{'timing_windows':len(timing_reviews), 'completed_timing_windows':len(timing_reviews)-len(timing_failures),
+                'failed_timing_windows':len(timing_failures), 'usable_words':word_count,
+                'timing_unverified_words':sum(len(x.get('timing_unverified',[])) for x in timing_reviews),
+                'source_mapping_status':lineage.get('status','unavailable') if lineage is not None else 'not_applicable'},
+            'reason':'; '.join(unavailable_reasons) if unavailable_reasons else 'machine timing evidence available for AI review; ASR agreement and valid timestamps do not prove complete phonemes or semantics',
+            'optional_listening':optional_listening}
     }
 
 
@@ -567,7 +596,7 @@ def analyze(args: argparse.Namespace) -> int:
         elif dur >= args.propose_internal:
             keep_each=0.14
             proposed_start=min(end,start+keep_each); proposed_end=max(start,end-keep_each)
-            decision="proposed_shorten_pending_confirmation"; reason="long internal pause; retains 140 ms on each side pending listening"
+            decision="proposed_shorten_pending_confirmation"; reason="long internal pause; retains 140 ms on each side pending evidenced AI assessment"
         candidates.append({
             "id":f"S{cid:03d}","silence_start":f"{start:.3f}","silence_end":f"{end:.3f}","silence_duration":f"{dur:.3f}",
             "context_before":nearby_text(words,start,before=True),"context_after":nearby_text(words,end,before=False),
@@ -639,7 +668,7 @@ def analyze(args: argparse.Namespace) -> int:
         if float(x['end'])>float(x['start']):
             alerts.append({'check_id':'word_integrity','start':float(x['start']),'end':float(x['end']),
                 'kind':'low_confidence_word','text':x['word'],'review_required':True,'evidence':x})
-    machine=make_report(source,duration,review_checks(duration,alerts,opening),unique_alerts(source,alerts))
+    machine=make_report(source,duration,review_checks(duration,alerts,opening,timing_reviews=[word_evidence]),unique_alerts(source,alerts))
     machine['stage']='analyze'
     machine['silence_measurements']={'path':str(out/'silence-measurements.json'),'sha256':sha256(out/'silence-measurements.json'),
         'duration_comparison':silence_report['duration_comparison']}
@@ -657,8 +686,8 @@ def analyze(args: argparse.Namespace) -> int:
     summary={"source_duration_seconds":duration,"detected_word_count":len(words),"silence_candidate_count":len(candidates),"silence_proposed_range_count":len(proposed),"retake_group_count":len(retakes),"retake_proposed_range_count":len(retake_ranges),"opening_swallowed_restart_count":len(opening_restarts),"effective_opening_candidate_count":len(opening["alerts"]),"merged_proposed_range_count":len(merged_proposed),"proposed_delete_seconds":round(proposed_total,3),"estimated_original_speed_duration_seconds":round(estimated,3),"low_confidence_word_count":len(low),"repeat_candidate_count":len(repeats),"half_sentence_restart_candidate_count":len(fragment_restarts),"retake_policy":args.retake_policy,"human_listening":"not performed","editing_performed":False,"command_status":"completed","quality_status":machine["quality_status"],"detection_checks":machine["detection_checks"],"unresolved_alert_count":len(machine["alerts"])}
     (out/"analysis-summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
     transcript_text="\n".join(f"- {s['start']:.2f}–{s['end']:.2f}：{s['text'].strip()}" for s in main["segments"])
-    report=f"""# 口播原片分析报告\n\n## 范围\n\n本轮仅分析，没有剪切、变速、渲染或生成剪映工程。全部拟删区间等待用户确认；未进行真人耳听。\n\n## 输入\n\n- 文件：`{source}`\n- SHA256：`{source_hash}`\n- 时长：{duration:.3f}秒\n- 本地ASR：faster-whisper {args.model} int8，{1 if args.single_pass else 2}路\n- 重录策略：`{args.retake_policy}`\n\n## 自动候选\n\n- 静音候选：{len(candidates)}处，其中{len(proposed)}处提出缩短\n- 连续重录组：{len(retakes)}组，其中{len(retake_ranges)}组达到机器高置信拟删条件\n- 开场异常长词候选：{len(opening_restarts)}组；有效发声开场多尺度候选：{len(opening["alerts"])}项（执行状态：{opening["status"]}）\n- 合并去重后的拟删区间：{len(merged_proposed)}处，共{proposed_total:.3f}秒\n- 原速预计时长：{estimated:.3f}秒\n- 低置信词：{len(low)}项\n- 近距离重复表达候选：{len(repeats)}项\n\n详细静音区间见 `silence-candidates.csv`，长句重录组见 `retake-candidates.csv`，开场吞并候选见`opening-retake-candidates.csv`，其他文字疑点见 `review-items.csv`。`last_complete`只提出候选，最后一次完整性仍需试听或用户确认。\n\n## 主转写\n\n{transcript_text}\n\n## 状态\n\n- 哈希、媒体参数、波形、逐词时间、静音候选、重录候选：已生成\n- 真人听校、吞字判断、最后一句完整性：未验证\n- 实际剪辑：未执行\n"""
-    report += f"\n- 命令执行：completed；质量状态：{machine['quality_status']}；未解决警报：{len(machine['alerts'])}\n- 有效开场分窗：{opening['status']}；策略 none 不关闭检测。\n- 每项执行范围及原因见 review-report.json；零候选不能代替原音复核。\n"
+    report=f"""# 口播原片分析报告\n\n## 范围\n\n本轮仅分析，没有剪切、变速、渲染或生成剪映工程。拟删区间须按当前流程模式完成证据审核；本报告记录机器分析，未进行主观听感验证。\n\n## 输入\n\n- 文件：`{source}`\n- SHA256：`{source_hash}`\n- 时长：{duration:.3f}秒\n- 本地ASR：faster-whisper {args.model} int8，{1 if args.single_pass else 2}路\n- 重录策略：`{args.retake_policy}`\n\n## 自动候选\n\n- 静音候选：{len(candidates)}处，其中{len(proposed)}处提出缩短\n- 连续重录组：{len(retakes)}组，其中{len(retake_ranges)}组达到机器高置信拟删条件\n- 开场异常长词候选：{len(opening_restarts)}组；有效发声开场多尺度候选：{len(opening["alerts"])}项（执行状态：{opening["status"]}）\n- 合并去重后的拟删区间：{len(merged_proposed)}处，共{proposed_total:.3f}秒\n- 原速预计时长：{estimated:.3f}秒\n- 低置信词：{len(low)}项\n- 近距离重复表达候选：{len(repeats)}项\n\n详细静音区间见 `silence-candidates.csv`，长句重录组见 `retake-candidates.csv`，开场吞并候选见`opening-retake-candidates.csv`，其他文字疑点见 `review-items.csv`。`last_complete`只提出候选，最后一次完整性仍须结合局部分窗、声学边界及上下文完成 AI 核对，不能只凭候选自动通过。\n\n## 主转写\n\n{transcript_text}\n\n## 状态\n\n- 哈希、媒体参数、波形、逐词时间、静音候选、重录候选：已生成\n- 机器词时序与边界证据：见 review-report.json；主观听感未验证，且不是必需条件\n- 实际剪辑：未执行\n"""
+    report += f"\n- 命令执行：completed；质量状态：{machine['quality_status']}；未解决警报：{len(machine['alerts'])}\n- 有效开场分窗：{opening['status']}；策略 none 不关闭检测。\n- 每项执行范围及原因见 review-report.json；零候选不能代替有证据的 AI 质检；机器疑点须逐项处理。\n"
     (out/"analysis-report.md").write_text(report,encoding="utf-8")
     print(json.dumps({"output_dir":str(out),"summary":summary},ensure_ascii=False,indent=2))
     return 0
@@ -721,7 +750,7 @@ def review_stage(args: argparse.Namespace) -> int:
         if item['end']>item['start']:
             alerts.append({'check_id':'breath_gaps','start':item['start'],'end':item['end'],
                 'kind':'pause_review','text':'','review_required':True,
-                'reason':'measured quiet interval; listen to distinguish breath, pacing, or dead air'})
+                'reason':'measured quiet interval; assess timing and context to distinguish breath, pacing, or dead air; no automatic deletion'})
     silence_report,silence_alerts=silence_audit(source,audio,out,duration,{'residual':silence.stderr})
     alerts.extend(silence_alerts)
     inherited,lineage=propagate_analysis_alerts(source,duration)
@@ -744,11 +773,9 @@ def review_stage(args: argparse.Namespace) -> int:
         alerts.append({'check_id':'word_integrity','start':a,'end':b,'kind':'user_feedback',
             'text':feedback,'review_required':True,'reason':'compare original and current audio; prior transcript cannot dismiss feedback',
             'reference_report':comparison})
-    checks=review_checks(duration,alerts,opening,full=full)
+    checks=review_checks(duration,alerts,opening,full=full,timing_reviews=reports,lineage=lineage)
     if any(x['status']!='executed' for x in reports):
         checks['repeated_speech'].update(status='unavailable',reason='one or more requested ASR windows failed; incomplete detection')
-    if full and lineage['status']!='executed':
-        checks['word_integrity']['reason']+='; '+lineage['reason']
     report=make_report(source,duration,checks,unique_alerts(source,alerts))
     report.update(stage=args.stage,windows=reports,opening_review={'path':str(out/'opening-review.json'),
         'sha256':sha256(out/'opening-review.json'),'status':opening['status'],

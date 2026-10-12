@@ -261,5 +261,25 @@ class AnalysisToCaptionsTests(unittest.TestCase):
         self.assertEqual(validation['overlaps'],0)
         self.assertEqual(validation['human_listening'],'not performed')
 
+    def test_semiauto_machine_review_without_listening_can_enter_captions(self):
+        self.render_and_review();gate,resolutions,_=self.protocol_evidence()
+        evidence=self.root/'synthetic_machine_review.txt'
+        evidence.write_text('SYNTHETIC machine-only review fixture: timing, coverage, mapping; no listening.',encoding='utf-8')
+        for item in resolutions['alerts']+resolutions['check_resolutions']:
+            item['reviewer']={'kind':'agent','method':'machine_evidence_review',
+                'recorded_at':'synthetic','quote':'Synthetic timing, coverage and source mapping reviewed.'}
+            item['assessment']='Synthetic machine evidence covers this item; no listening claim.'
+            item['evidence']=[{'kind':'machine_verification','path':str(evidence),'sha256':pipeline.sha256(evidence)}]
+        write_json(self.resolutions,resolutions)
+        gate['residual_review']['resolutions']['sha256']=pipeline.sha256(self.resolutions)
+        # Semi-auto still needs the stage approval, but that approval is not listening proof.
+        approval=self.root/'synthetic_stage_approval.txt'
+        approval.write_text('SYNTHETIC user approved this preview version; no listening statement.',encoding='utf-8')
+        gate['user_approval']['evidence']=str(approval)
+        write_json(self.gate,gate)
+        result,out=self.captions_cli('machine_only_captions')
+        self.assertEqual(result.returncode,0,result.stderr+result.stdout)
+        self.assertTrue((out/'captions.srt').is_file())
+
 
 if __name__=='__main__':unittest.main()
