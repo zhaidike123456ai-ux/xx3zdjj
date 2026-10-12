@@ -67,13 +67,29 @@ class ReviewStateTests(unittest.TestCase):
     def evidence(self):
         return [{'path': self.confirmation.name, 'sha256': file_hash(self.confirmation), 'kind': 'listening_confirmation'}]
 
+    def semantic_evidence(self, target_key, target_id, coverage, verification,
+                          kind='machine_verification', path=None, **bindings):
+        path = path or self.confirmation
+        record = {'schema_version': 2, 'kind': kind, 'source_sha256': file_hash(self.source),
+                  target_key: target_id, 'coverage': dict(coverage), 'verification': verification,
+                  'observations': [{'method': 'synthetic timing and source-map comparison',
+                                    'finding': 'SYNTHETIC fixture: both repeated tokens map to the retained 0.2-0.5 second range; this is not real speech acceptance.'}],
+                  **bindings}
+        path.write_text(json.dumps(record), encoding='utf-8')
+        return [{'path': path.name, 'sha256': file_hash(path), 'kind': kind}]
+
     def resolve_alert(self, outcome='retain_normal_repetition'):
         alert = self.alert()
         self.save()
-        self.resolutions = {'schema_version': 1, 'report_sha256': file_hash(self.report_path),
+        verification = 'confirmed_issue' if outcome == 'fixed' else 'confirmed_benign'
+        coverage = {'scope': 'alert_window', 'start': alert['start'], 'end': alert['end']}
+        self.resolutions = {'schema_version': 2, 'report_sha256': file_hash(self.report_path),
                             'source_sha256': file_hash(self.source), 'alerts': [
-                                {'alert_id': alert['id'], 'outcome': outcome, 'assessment': 'synthetic normal emphasis',
-                                 'reviewer': self.reviewer(), 'evidence': self.evidence()}], 'check_resolutions': []}
+                                {'alert_id': alert['id'], 'decision': 'repair' if outcome == 'fixed' else 'retain',
+                                 'verification': verification, 'coverage': coverage,
+                                 'assessment': 'synthetic normal emphasis', 'reviewer': self.reviewer(),
+                                 'evidence': self.semantic_evidence('alert_id', alert['id'], coverage, verification,
+                                                                    kind='listening_confirmation')}], 'check_resolutions': []}
 
     def test_full_executed_clean_report_has_no_automatic_listening_claim(self):
         self.assertEqual(self.check(), [])
@@ -106,8 +122,7 @@ class ReviewStateTests(unittest.TestCase):
                             'recorded_at': 'synthetic fixture timestamp',
                             'quote': 'Synthetic ASR/timing comparison, not actual listening.'}
         item['assessment'] = 'Synthetic machine evidence supports normal repetition in the flagged range.'
-        item['evidence'] = [{'kind': 'machine_verification', 'path': self.confirmation.name,
-                             'sha256': file_hash(self.confirmation)}]
+        item['evidence'] = self.semantic_evidence('alert_id', item['alert_id'], item['coverage'], item['verification'])
         return item
 
     def test_machine_evidence_can_resolve_without_listening_capability(self):
@@ -151,9 +166,11 @@ class ReviewStateTests(unittest.TestCase):
         self.resolutions['report_sha256'] = file_hash(self.report_path)
         self.assertTrue(any('unverified' in e for e in self.check()))
         self.resolutions['check_resolutions'] = [{
-            'check_id': 'word_integrity', 'outcome': 'verified', 'coverage': full_coverage(2),
+            'check_id': 'word_integrity', 'verification': 'confirmed', 'coverage': full_coverage(2),
             'assessment': 'Synthetic full-media machine timing comparison, not phoneme listening.',
-            'reviewer': dict(item['reviewer']), 'evidence': list(item['evidence'])}]
+            'reviewer': dict(item['reviewer']),
+            'evidence': self.semantic_evidence('check_id', 'word_integrity', full_coverage(2), 'confirmed',
+                                                path=self.root/'machine-check.json')}]
         self.assertEqual(self.check(), [])
         self.resolutions['check_resolutions'][0]['coverage']['end'] = 1
         self.assertTrue(any('full-media coverage' in e for e in self.check()))
@@ -162,6 +179,164 @@ class ReviewStateTests(unittest.TestCase):
         self.machine_resolution()
         self.resolutions['alerts'] = []
         self.assertTrue(any('unresolved review_required' in e for e in self.check()))
+
+    def details(self, **kwargs):
+        self.save()
+        return validate_review(self.report_path, self.source,
+                               self.resolutions_path if self.resolutions is not None else None,
+                               return_details=True, **kwargs)
+
+    def rewrite_machine_evidence(self, item, update):
+        path = self.root / item['evidence'][0]['path']
+        record = json.loads(path.read_text(encoding='utf-8'))
+        update(record)
+        path.write_text(json.dumps(record), encoding='utf-8')
+        item['evidence'][0]['sha256'] = file_hash(path)
+
+    def test_inconclusive_retention_remains_unresolved_despite_zero_counts(self):
+        item = self.machine_resolution()
+        item['verification'] = 'inconclusive'
+        self.rewrite_machine_evidence(item, lambda record: record.update(verification='inconclusive'))
+        self.report['blocking_counts'] = {'unresolved': 0, 'known_unfixed': 0}
+        self.report['quality_status'] = 'passed'
+        self.save()
+        self.resolutions['report_sha256'] = file_hash(self.report_path)
+        result = self.details()
+        self.assertEqual(item['decision'], 'retain')
+        self.assertEqual(result['unresolved_count'], 1)
+        self.assertEqual(result['blocking_counts']['unresolved'], 1)
+        self.assertEqual(result['unresolved_alert_ids'], [item['alert_id']])
+        self.assertTrue(any('inconclusive' in error for error in result['errors']))
+
+    def test_retaining_confirmed_issue_does_not_make_it_a_false_positive(self):
+        item = self.machine_resolution()
+        item['verification'] = 'confirmed_issue'
+        self.rewrite_machine_evidence(item, lambda record: record.update(verification='confirmed_issue'))
+        result = self.details()
+        self.assertEqual(result['unresolved_count'], 1)
+        self.assertEqual(result['known_unfixed_count'], 1)
+        self.assertTrue(result['errors'])
+
+    def test_matching_machine_observations_can_confirm_retained_benign_alert(self):
+        item = self.machine_resolution()
+        result = self.details()
+        self.assertNotIn('outcome', item)
+        self.assertNotIn('capability', item['reviewer'])
+        self.assertEqual((item['decision'], item['verification']), ('retain', 'confirmed_benign'))
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result['blocking_counts'], {'unresolved': 0, 'known_unfixed': 0})
+
+    def test_unrelated_or_partial_machine_evidence_cannot_clear_alert(self):
+        variants = [
+            ('source', lambda record: record.update(source_sha256='0' * 64)),
+            ('target', lambda record: record.update(alert_id='another-alert')),
+            ('missing binding', lambda record: record.pop('alert_id')),
+            ('narrow range', lambda record: record.update(coverage={'scope': 'alert_window', 'start': .2, 'end': .3})),
+            ('wrong scope', lambda record: record.update(coverage={'scope': 'arbitrary', 'start': .2, 'end': .5})),
+            ('no observation', lambda record: record.update(observations=[])),
+            ('empty finding', lambda record: record.update(observations=[{'method': 'asr', 'finding': ''}])),
+            ('disagrees', lambda record: record.update(verification='inconclusive')),
+        ]
+        for label, update in variants:
+            with self.subTest(label=label):
+                item = self.machine_resolution()
+                self.rewrite_machine_evidence(item, update)
+                result = self.details()
+                self.assertTrue(result['errors'])
+                self.assertEqual(result['unresolved_count'], 1)
+
+    def test_valid_hash_on_generic_receipt_is_not_semantic_evidence(self):
+        item = self.machine_resolution()
+        self.confirmation.write_text('Generic machine check passed', encoding='utf-8')
+        item['evidence'][0]['sha256'] = file_hash(self.confirmation)
+        result = self.details()
+        self.assertTrue(any('structured observations' in error for error in result['errors']))
+        self.assertEqual(result['unresolved_count'], 1)
+
+    def test_report_hash_binding_becomes_stale_even_if_resolution_hash_is_updated(self):
+        item = self.machine_resolution()
+        self.rewrite_machine_evidence(item, lambda record: record.update(report_sha256=file_hash(self.report_path)))
+        self.assertEqual(self.check(), [])
+        self.report['additional_detector_run'] = 'changed report fixture'
+        self.save()
+        self.resolutions['report_sha256'] = file_hash(self.report_path)
+        result = self.details()
+        self.assertTrue(any('semantic evidence belongs to another residual report' in error for error in result['errors']))
+        self.assertEqual(result['unresolved_count'], 1)
+
+    def test_report_binding_without_target_id_still_requires_matching_scope(self):
+        item = self.machine_resolution()
+        def bind_report(record):
+            record.pop('alert_id')
+            record['report_sha256'] = file_hash(self.report_path)
+        self.rewrite_machine_evidence(item, bind_report)
+        self.assertEqual(self.check(), [])
+        self.rewrite_machine_evidence(item, lambda record: record.update(coverage={'scope': 'alert_window', 'start': .7, 'end': 1}))
+        self.assertTrue(any('coverage' in error for error in self.check()))
+
+    def test_inconclusive_check_supplement_is_derived_unverified(self):
+        self.report['checks']['word_integrity'].update(status='unavailable', result='unverified', reason='synthetic timing needs review')
+        self.save()
+        self.resolutions = {'schema_version': 2, 'report_sha256': file_hash(self.report_path),
+                            'source_sha256': file_hash(self.source), 'alerts': [], 'check_resolutions': [{
+                                'check_id': 'word_integrity', 'verification': 'inconclusive', 'coverage': full_coverage(2),
+                                'assessment': 'Synthetic comparison cannot establish complete word-timing coverage.',
+                                'reviewer': {'kind': 'agent', 'method': 'machine_evidence_review',
+                                             'recorded_at': 'fixture timestamp', 'quote': 'Missing timing interval remains unresolved.'},
+                                'evidence': self.semantic_evidence('check_id', 'word_integrity', full_coverage(2), 'inconclusive')}]}
+        result = self.details()
+        self.assertEqual(result['unverified_check_count'], 1)
+        self.assertEqual(result['unverified_check_ids'], ['word_integrity'])
+        self.assertEqual(result['blocking_counts']['unresolved'], 1)
+        self.assertTrue(result['errors'])
+
+    def test_failed_detector_cannot_be_overridden_by_confirmed_supplement(self):
+        self.report['checks']['word_integrity']['result'] = 'failed'
+        self.save()
+        self.resolutions = {'schema_version': 2, 'report_sha256': file_hash(self.report_path),
+                            'source_sha256': file_hash(self.source), 'alerts': [], 'check_resolutions': [{
+                                'check_id': 'word_integrity', 'verification': 'confirmed', 'coverage': full_coverage(2),
+                                'assessment': 'Synthetic claimed complete timing after a failed detector.',
+                                'reviewer': {'kind': 'agent', 'method': 'machine_evidence_review',
+                                             'recorded_at': 'fixture timestamp', 'quote': 'Synthetic claim.'},
+                                'evidence': self.semantic_evidence('check_id', 'word_integrity', full_coverage(2), 'confirmed')}]}
+        result = self.details()
+        self.assertEqual(result['unverified_check_count'], 1)
+        self.assertTrue(any('failed detector' in error for error in result['errors']))
+
+    def test_legacy_resolution_cannot_bypass_v2_even_with_historical_opt_in(self):
+        self.machine_resolution()
+        self.resolutions['schema_version'] = 1
+        for allow_legacy in (False, True):
+            result = self.details(allow_legacy=allow_legacy)
+            self.assertTrue(any('requires v2' in error for error in result['errors']))
+            self.assertEqual(result['unresolved_count'], 1)
+
+    def test_legacy_listening_history_is_explicitly_distinct_from_current_clearance(self):
+        self.resolve_alert()
+        self.report['schema_version'] = 1
+        self.resolutions['schema_version'] = 1
+        item = self.resolutions['alerts'][0]
+        item.pop('decision'); item.pop('verification'); item.pop('coverage')
+        item['outcome'] = 'retain_normal_repetition'
+        self.confirmation.write_text('SYNTHETIC historical user-listening record; not actual listening.', encoding='utf-8')
+        item['evidence'] = self.evidence()
+        self.save()
+        self.resolutions['report_sha256'] = file_hash(self.report_path)
+        self.assertTrue(any('historical reading' in error for error in self.details()['errors']))
+        result = self.details(allow_legacy=True)
+        self.assertEqual(result['errors'], [])
+        self.assertTrue(result['legacy'])
+        self.assertEqual(result['status'], 'legacy_history')
+
+    def test_legacy_outcome_cannot_hide_inconclusive_v2_verification(self):
+        item = self.machine_resolution()
+        item.update(outcome='false_positive', verification='inconclusive')
+        self.rewrite_machine_evidence(item, lambda record: record.update(verification='inconclusive'))
+        result = self.details()
+        self.assertEqual(result['unresolved_count'], 1)
+        self.assertTrue(any('legacy outcome' in error for error in result['errors']))
 
     def test_explanation_without_evidence_does_not_resolve(self):
         self.resolve_alert()
@@ -202,10 +377,11 @@ class ReviewStateTests(unittest.TestCase):
                                                        'reason': 'ASR cannot establish word completeness'})
         self.report['quality_status'] = 'unverified'
         self.save()
-        self.resolutions = {'schema_version': 1, 'report_sha256': file_hash(self.report_path), 'source_sha256': file_hash(self.source),
-                            'alerts': [], 'check_resolutions': [{'check_id': 'word_integrity', 'outcome': 'verified',
+        self.resolutions = {'schema_version': 2, 'report_sha256': file_hash(self.report_path), 'source_sha256': file_hash(self.source),
+                            'alerts': [], 'check_resolutions': [{'check_id': 'word_integrity', 'verification': 'confirmed',
                             'coverage': full_coverage(2.0), 'assessment': 'synthetic full-media listening assertion',
-                            'reviewer': self.reviewer(), 'evidence': self.evidence()}]}
+                            'reviewer': self.reviewer(), 'evidence': self.semantic_evidence('check_id', 'word_integrity',
+                                full_coverage(2), 'confirmed', kind='listening_confirmation')}]}
         self.assertEqual(self.check(), [])
         self.resolutions['check_resolutions'][0]['coverage']['end'] = 1
         self.assertTrue(any('full-media coverage' in e for e in self.check()))

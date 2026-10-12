@@ -19,6 +19,10 @@ import sys
 import tempfile
 import uuid
 
+from workflow_mode import (SETTINGS_DIGEST_VERSION, normalize_setting_value,
+                           preserve_legacy_settings_binding, settings_digest,
+                           stage_settings_digest)
+
 
 PROJECT_DIRS = {
     "00_project_info": "项目说明、设置、进度与真实确认记录",
@@ -66,6 +70,35 @@ def sha(path):
 
 def object_hash(obj):
     return hashlib.sha256(json.dumps(obj, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def artifact_settings_match(row, settings):
+    """Read old artifact bindings exactly; new records use stable stage values."""
+    stage = row.get("settings_stage")
+    if not stage:
+        return True
+    values = settings.get("pipeline", {}).get(stage, {})
+    version = row.get("settings_digest_version", 1)
+    digest = object_hash(values) if version == 1 else stage_settings_digest(values) if version == SETTINGS_DIGEST_VERSION else None
+    return digest is not None and digest == row.get("settings_sha256")
+
+
+def migrate_artifact_settings(data, settings):
+    """Upgrade only still-valid old bindings before a recorded settings change."""
+    for row in data.get("artifacts", []):
+        stage = row.get("settings_stage")
+        if stage and row.get("settings_digest_version", 1) == 1 and artifact_settings_match(row, settings):
+            row["settings_sha256"] = stage_settings_digest(settings.get("pipeline", {}).get(stage, {}))
+            row["settings_digest_version"] = SETTINGS_DIGEST_VERSION
+
+
+def setting_value(settings, key):
+    cursor = settings
+    for part in key.split("."):
+        if not isinstance(cursor, dict) or part not in cursor:
+            return False, None
+        cursor = cursor[part]
+    return True, cursor
 
 
 def read(path, default=None):
@@ -389,19 +422,26 @@ def configure_workflow(args):
 
 def set_setting(args):
     project, manifest, data = info(args.project)
-    value = json.loads(args.value)
+    value = normalize_setting_value(args.key, json.loads(args.value))
     with lock(project / "00_project_info"):
         project, manifest, data = info(project)
         settings = read(settings_path(project))
         previous = json.loads(json.dumps(settings, ensure_ascii=False))
-        assign(settings, args.key, value)
-        settings.setdefault("confirmed_choices", {})[args.key] = {"value": value, "evidence": args.evidence, "at": now()}
-        if settings != previous:
-            invalidate_workflow(settings, "project settings changed")
-        write(settings_path(project), settings)
-        data["settings_history"].append({"key": args.key, "value": value, "evidence": args.evidence, "at": now()})
+        exists, old = setting_value(settings, args.key)
+        changed = not exists or normalize_setting_value(args.key, old) != value
+        # Validate the key even when its value is unchanged.
+        assign({}, args.key, value)
+        if changed:
+            preserve_legacy_settings_binding(settings, base_dir=settings_path(project).parent)
+            migrate_artifact_settings(data, previous)
+            assign(settings, args.key, value)
+            settings.setdefault("confirmed_choices", {})[args.key] = {"value": value, "evidence": args.evidence, "at": now()}
+            if settings_digest(settings) != settings_digest(previous):
+                invalidate_workflow(settings, "project settings changed")
+            write(settings_path(project), settings)
+        data["settings_history"].append({"key": args.key, "value": value, "evidence": args.evidence, "at": now(), "changed": changed})
         write(manifest, data)
-    return {"status": "updated", "settings": str(settings_path(project)), "key": args.key}
+    return {"status": "updated", "changed": changed, "settings": str(settings_path(project)), "key": args.key}
 
 
 def preference(args):
@@ -436,20 +476,34 @@ def apply_preferences(args):
     with lock(project / "00_project_info"):
         project, manifest, data = info(project)
         settings = read(settings_path(project))
+        previous = json.loads(json.dumps(settings, ensure_ascii=False))
         # Generic defaults first; an explicitly requested context can refine them.
         records = sorted(prefs["items"].values(), key=lambda row: row.get("context", "") != "all")
+        selected = {}
         for row in records:
             if row.get("status") != "confirmed" or row.get("context") not in ("all", args.context):
                 continue
             existing = settings.get("confirmed_choices", {}).get(row["key"], {})
             if existing and existing.get("origin") != "preference":
                 continue
-            assign(settings, row["key"], row["value"])
+            selected[row["key"]] = row
+        # Resolve context precedence before applying anything. A temporary
+        # generic value must not revoke authorization when the final value is
+        # exactly the current context-specific setting.
+        for key, row in selected.items():
+            value = normalize_setting_value(key, row["value"])
+            exists, old = setting_value(settings, key)
+            if exists and normalize_setting_value(key, old) == value:
+                continue
+            if not changes:
+                preserve_legacy_settings_binding(settings, base_dir=settings_path(project).parent)
+                migrate_artifact_settings(data, previous)
+            assign(settings, key, value)
             settings.setdefault("confirmed_choices", {})[row["key"]] = {
-                "value": row["value"], "origin": "preference", "preference_id": row["id"],
+                "value": value, "origin": "preference", "preference_id": row["id"],
                 "evidence": row["evidence"], "at": now()}
             changes.append(row["key"])
-        if changes:
+        if changes and settings_digest(settings) != settings_digest(previous):
             invalidate_workflow(settings, "confirmed preferences changed effective settings")
         write(settings_path(project), settings)
         data["settings_history"].append({"action": "apply_confirmed_preferences", "keys": changes, "at": now()})
@@ -568,7 +622,7 @@ def artifact_state(row, rows, settings, visiting=None, sources_valid=True, proje
     if not path.is_file() or sha(path) != row["sha256"]:
         return "changed_approval_invalid"
     stage = row.get("settings_stage")
-    if stage and object_hash(settings.get("pipeline", {}).get(stage, {})) != row.get("settings_sha256"):
+    if not artifact_settings_match(row, settings):
         return "settings_changed_approval_invalid"
     for key in row.get("depends_on", []):
         parent = next((r for r in rows if r["id"] == key), None)
@@ -622,7 +676,8 @@ def register_artifact(args):
         stage = ARTIFACT_STAGES[args.kind]
         row = {"id": "artifact_" + uuid.uuid4().hex[:12], "kind": args.kind,
                "path": str(file), "sha256": sha(file), "at": now(), "depends_on": args.depends_on,
-               "settings_stage": stage, "settings_sha256": object_hash(settings.get("pipeline", {}).get(stage, {})) if stage else None}
+               "settings_stage": stage, "settings_digest_version": SETTINGS_DIGEST_VERSION,
+               "settings_sha256": stage_settings_digest(settings.get("pipeline", {}).get(stage, {})) if stage else None}
         data["artifacts"].append(row)
         write(manifest, data)
     return {"status": "registered", "artifact": row}
@@ -672,7 +727,7 @@ def review_artifact(args):
         if not path.is_file() or sha(path) != row["sha256"]:
             raise ValueError("artifact changed; register the new version first")
         stage = row.get("settings_stage")
-        if stage and object_hash(settings.get("pipeline",{}).get(stage,{})) != row.get("settings_sha256"):
+        if not artifact_settings_match(row, settings):
             raise ValueError("artifact settings changed; register the new version first")
         for parent_id in row.get("depends_on",[]):
             parent = next((r for r in data["artifacts"] if r["id"]==parent_id),None)
@@ -759,6 +814,10 @@ def status(args):
 
 
 def main():
+    # Deterministic UTF-8 JSON when Windows redirects stdout using a legacy code page.
+    for stream in (sys.stdout,sys.stderr):
+        if hasattr(stream,'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--studio-root", help="persistent local studio root, outside the installed Skill")
     sub = parser.add_subparsers(dest="command", required=True)

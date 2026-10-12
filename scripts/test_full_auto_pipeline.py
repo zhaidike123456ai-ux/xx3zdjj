@@ -75,7 +75,7 @@ class FullAutoPipelineTests(unittest.TestCase):
             item['reviewer']={'kind':'agent','method':'machine_evidence_review','recorded_at':'synthetic',
                               'quote':'Synthetic fixture: machine timing, coverage and lineage records checked.'}
             item['assessment']='Synthetic protocol fixture: machine evidence accounts for this alert or check; no listening claim.'
-            item['evidence']=[{'kind':'machine_verification','path':str(self.evidence),'sha256':pipeline.sha256(self.evidence)}]
+            item['evidence']=self.h.resolution_evidence(item)
         fixtures.write_json(self.h.resolutions,resolutions)
         residual=old['residual_review'];residual['resolutions']['sha256']=pipeline.sha256(self.h.resolutions)
         self.gate('rough-cut',{'source':self.h.media},self.h.gate,residual_review=residual)

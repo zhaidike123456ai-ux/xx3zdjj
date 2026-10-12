@@ -129,7 +129,7 @@ class AnalysisIntegrationTests(unittest.TestCase):
         decisions=read_csv(self.out/'deletion-decisions.csv')
         rows=[x for x in decisions if x['candidate_type']=='short_fragment_or_swallowed_restart']
         self.assertTrue(rows)
-        self.assertTrue(all(x['program_decision']=='local_audio_review_required' for x in rows))
+        self.assertTrue(all(x['program_decision'] in ('local_audio_review_required','evidenced_semantic_and_acoustic_review_required') for x in rows))
         self.assertTrue(all(not x['delete_start'] and not x['delete_end'] for x in rows))
 
     def test_zero_machine_candidate_is_not_a_quality_pass(self):
@@ -247,7 +247,8 @@ class RoughCutBoundaryTests(unittest.TestCase):
         return argparse.Namespace(source=self.source,analysis_dir=self.analysis,output_dir=self.out,overwrite=False,fps=None,
                 output_name='rough.mp4',approve_candidate=['RT001'],decision_file=self.decision,confirmed_delete=[],crf=18,preset='ultrafast')
 
-    def test_range_that_passes_raw_check_but_crosses_onset_after_quantization_rejected(self):
+    def test_actual_frame_boundary_crossing_onset_is_rejected(self):
+        self.row["delete_end"]="1.04";self.write_decision()
         with patch.object(pipeline,'probe',return_value=self.meta),patch.object(pipeline,'run') as renderer:
             with self.assertRaisesRegex(SystemExit,'quantized.*overlaps|quantiz.*onset'):
                 pipeline.rough_cut(self.args())

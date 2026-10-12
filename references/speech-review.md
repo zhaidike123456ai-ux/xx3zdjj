@@ -75,6 +75,6 @@ python scripts/run_pipeline.py local-review \
 
 保持成片、edit-map 和被引用的分析报告一起可访问。旧版缺少这些记录时，重新分析、生成新版粗剪与残留报告；旧的“全通过”计数不能替代新证据。
 
-保留正常叠词或误报时，用绑定当前媒体和报告 hash 的 resolution 记录 `retain_normal_repetition` 或 `false_positive`。`reviewer` 使用 `kind: agent`、`method: machine_evidence_review`，保留真实 `recorded_at/quote`；`assessment` 写明具体判断、窗口与时间范围及依据；`evidence` 至少一项 `kind: machine_verification`，带真实 `path/sha256`。例如正常叠词的处理应说明局部转写、上下文与映射为何支持保留，不能只写“没有问题”。缺听音频能力不转交用户补听，也不自动把所有警报改为通过。
+保留正常叠词或确认误报时，用[机器证据协议v2](review-evidence-v2.md)记录 `decision: retain` 与 `verification: confirmed_benign`；不确定保留须写 `verification: inconclusive`，仍属于未决。证据绑定当前媒体、警报/检查与覆盖范围，说明局部转写、上下文和映射为何支持结论；不能只写“没有问题”。新协议不要求实际听校，不能自动把所有警报归为误报。
 
 需要修改的警报不能在同一旧报告里写 `fixed` 消除。先修媒体，再运行新残留检测；旧报告与旧确认失效。机器未覆盖部分须取得对应范围的实际机器证据，不能用静态文件结构代替语音检查。旧听校记录只在原有证据与能力声明真实且满足兼容校验时保留；缺失或虚假的旧听校记录不能只补一个证据 kind 放行，须对受影响范围重新做机器审查并生成新方法与证据。未改媒体可复用有效缓存，不为更换报告方法全片重剪。

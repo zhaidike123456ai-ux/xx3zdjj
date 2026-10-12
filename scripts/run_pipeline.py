@@ -22,6 +22,10 @@ from connect_captions import connect
 from opening_review import analyze_opening, execute_opening_review, source_relative_word_evidence
 from silence_review import parse_silence as _parse_silence, parse_silence_measurements, decoded_duration_diagnostic
 from review_state import make_report, full_coverage, stable_alert_id
+from pause_policy import plan_pauses, quantize_deletions
+from caption_review import review_caption_timing, plan_caption_layout
+from retake_policy import detect_retake_groups
+from workflow_mode import normalize_setting_value
 
 
 def run(cmd: list[str], *, capture: bool = True) -> subprocess.CompletedProcess:
@@ -223,7 +227,7 @@ def repeated_phrases(words: list[dict]) -> list[dict]:
                             "phrase":phrase,
                             "first_start":words[j]["start"],"first_end":words[j+n-1]["end"],
                             "repeat_start":words[i]["start"],"repeat_end":words[i+n-1]["end"],
-                            "status":"review only; do not delete without user approval",
+                            "status":"review candidate; requires evidenced assessment and the selected workflow approval policy",
                         }); seen.add(key)
             index.setdefault(phrase,[]).append(i)
     found.sort(key=lambda x:(x["repeat_start"],-len(x["phrase"])))
@@ -252,7 +256,7 @@ def fragment_restart_candidates(words: list[dict]) -> list[dict]:
             left="".join(tokens[first:second]); right="".join(tokens[second:second+size])
             if not left or left!=right: continue
             gap=float(words[second]["start"])-float(words[second-1]["end"])
-            if gap>0.8: continue
+            if gap>(20.0 if len(left)>=2 else 0.8): continue
             rows.append({
                 "start":float(words[first]["start"]),"end":float(words[second]["start"]),
                 "content":left,"evidence":f"short phrase start repeats after {gap:.3f}s",
@@ -294,32 +298,6 @@ def frame_safe_retake_cut_start(previous_word_end: float, failed_audio_onset: fl
     if frame_start <= previous_word_end:
         raise ValueError("no safe gap between previous word and failed take onset")
     return frame_start
-
-
-def detect_retake_groups(segments: list[dict], policy: str) -> list[dict]:
-    candidates=[]
-    for size in (3,2,1):
-        for i in range(len(segments)-size):
-            a=segments[i:i+size]; ta=clean_token("".join(x["text"] for x in a))
-            if len(ta)<12: continue
-            for j in range(i+size,len(segments)-size+1):
-                b=segments[j:j+size]; tb=clean_token("".join(x["text"] for x in b))
-                if len(tb)<12: continue
-                gap=float(b[0]["start"])-float(a[-1]["end"])
-                if not 0.8<=gap<=20: continue
-                ratio=SequenceMatcher(None,ta,tb).ratio()
-                if ratio<0.78: continue
-                candidates.append({"first_start":float(a[0]["start"]),"first_end":float(a[-1]["end"]),"first_text":"".join(x["text"] for x in a).strip(),"last_start":float(b[0]["start"]),"last_end":float(b[-1]["end"]),"last_text":"".join(x["text"] for x in b).strip(),"similarity":ratio,"gap":gap,"size":size})
-    candidates.sort(key=lambda x:(-x["size"],-x["similarity"],x["first_start"]))
-    selected=[]
-    for x in candidates:
-        if any(not (x["last_end"]<y["first_start"] or x["first_start"]>y["last_end"]) for y in selected): continue
-        selected.append(x)
-    rows=[]
-    for i,x in enumerate(sorted(selected,key=lambda x:x["first_start"]),1):
-        high=policy == "last_complete" and x["similarity"]>=0.82 and x["size"]>=2
-        rows.append({"id":f"RT{i:03d}","first_attempt_start":f"{x['first_start']:.3f}","first_attempt_end":f"{x['first_end']:.3f}","first_attempt_text":x["first_text"],"last_attempt_start":f"{x['last_start']:.3f}","last_attempt_end":f"{x['last_end']:.3f}","last_attempt_text":x["last_text"],"similarity":f"{x['similarity']:.3f}","gap_seconds":f"{x['gap']:.3f}","policy":policy,"decision":"proposed_delete_first_attempt_keep_last_pending_confirmation" if high else "review_range_unclear","proposed_delete_start":f"{x['first_start']:.3f}" if high else "","proposed_delete_end":f"{max(x['first_start'],x['last_start']-0.12):.3f}" if high else "","kept_range":f"{x['last_start']:.3f}-{x['last_end']:.3f}","status":"machine candidate; last attempt completeness requires an evidenced AI assessment"})
-    return rows
 
 
 def detect_opening_swallowed_restarts(check_segments: list[dict] | None, silences: list[dict],
@@ -370,7 +348,8 @@ def transcribe(model, audio: Path, vad: bool, condition: bool, prompt: str | Non
 
 def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
     with path.open("w",newline="",encoding="utf-8-sig") as f:
-        w=csv.DictWriter(f,fieldnames=fieldnames); w.writeheader(); w.writerows(rows)
+        w=csv.DictWriter(f,fieldnames=fieldnames); w.writeheader()
+        w.writerows({k:json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v for k,v in row.items()} for row in rows)
 
 
 class OpeningDecoder:
@@ -581,34 +560,16 @@ def analyze(args: argparse.Namespace) -> int:
     (out/'transcript-timing.json').write_text(json.dumps(word_evidence,ensure_ascii=False,indent=2),encoding='utf-8')
     words=word_evidence['words']; first=float(words[0]["start"]) if words else 0; last=float(words[-1]["end"]) if words else duration
     opening=opening_audit(source,audio,out,args,words)
-    candidates=[]; cid=1
-    for s in silences:
-        start,end,dur=s["start"],s["end"],s["duration"]
-        decision="retain_or_review"; proposed_start=""; proposed_end=""; reason="normal breath/emphasis possible; do not delete by duration alone"
-        if start <= 0.10 and first-start > 0.60:
-            proposed_start=0.0; proposed_end=max(0,min(first,end)-0.12); decision="proposed_delete_pending_confirmation"; reason="leading measured silence only; ASR cannot extend this range across acoustic activity"
-        elif end <= first:
-            decision="covered_by_leading_trim"; reason="pre-speech region already covered by leading trim candidate"
-        elif end >= duration-0.10 and end-last > 0.60:
-            proposed_start=min(duration,max(last,start)+0.12); proposed_end=duration; decision="proposed_delete_pending_confirmation"; reason="trailing measured silence only; ASR cannot extend this range across acoustic activity"
-        elif start >= last:
-            decision="covered_by_trailing_trim"; reason="post-speech region covered by trailing trim candidate when present"
-        elif dur >= args.propose_internal:
-            keep_each=0.14
-            proposed_start=min(end,start+keep_each); proposed_end=max(start,end-keep_each)
-            decision="proposed_shorten_pending_confirmation"; reason="long internal pause; retains 140 ms on each side pending evidenced AI assessment"
-        candidates.append({
-            "id":f"S{cid:03d}","silence_start":f"{start:.3f}","silence_end":f"{end:.3f}","silence_duration":f"{dur:.3f}",
-            "context_before":nearby_text(words,start,before=True),"context_after":nearby_text(words,end,before=False),
-            "decision":decision,"proposed_delete_start":f"{proposed_start:.3f}" if proposed_start!="" else "",
-            "proposed_delete_end":f"{proposed_end:.3f}" if proposed_end!="" else "","reason":reason,"listening_status":"not human-auditioned",
-        }); cid+=1
+    candidates=plan_pauses(silences,words,duration,minimum_internal=args.propose_internal)
     write_csv(out/"silence-candidates.csv",candidates,list(candidates[0].keys()) if candidates else ["id"])
 
     proposed=[(float(x["proposed_delete_start"]),float(x["proposed_delete_end"])) for x in candidates if x["proposed_delete_start"] and float(x["proposed_delete_end"])>float(x["proposed_delete_start"])]
-    retakes=detect_retake_groups(main["segments"],args.retake_policy)
+    script_path=getattr(args,'script',None)
+    script_text=script_path.read_text(encoding='utf-8-sig') if script_path else None
+    retakes=detect_retake_groups(main["segments"],args.retake_policy,script_text)
+    (out/'retake-candidates.json').write_text(json.dumps(retakes,ensure_ascii=False,indent=2),encoding='utf-8')
     write_csv(out/"retake-candidates.csv",retakes,list(retakes[0].keys()) if retakes else ["id","decision","status"])
-    retake_ranges=[(float(x["proposed_delete_start"]),float(x["proposed_delete_end"])) for x in retakes if x.get("proposed_delete_start")]
+    retake_ranges=[(float(r["start"]),float(r["end"])) for x in retakes for r in x.get("proposed_delete_ranges",[])]
     video_stream=next((s for s in meta.get("streams",[]) if s.get("codec_type")=="video"),{})
     rate=video_stream.get("r_frame_rate") or video_stream.get("avg_frame_rate") or "30/1"
     num,den=(rate.split("/",1)+["1"])[:2] if "/" in rate else (rate,"1")
@@ -618,13 +579,31 @@ def analyze(args: argparse.Namespace) -> int:
     opening_ranges=[(float(x["proposed_delete_start"]),float(x["proposed_delete_end"])) for x in opening_restarts if x.get("proposed_delete_start")]
     fragment_restarts=fragment_restart_candidates(words)
     decision_rows=[]
+    for pause in candidates:
+        decision_rows.append({'candidate_id':pause['id'],'candidate_type':'quiet_gap',
+            'delete_start':pause['proposed_delete_start'],'delete_end':pause['proposed_delete_end'],
+            'keep_start':'','keep_end':'','content':pause['context_before']+' / '+pause['context_after'],
+            'evidence':json.dumps(pause,ensure_ascii=False),
+            'program_decision':pause['decision'],'actual_execution':'not_executed_in_analysis'})
+    for oi,alert in enumerate(opening['alerts'],1):
+        decision_rows.append({'candidate_id':f'OA{oi:03d}','candidate_type':'short_fragment_or_swallowed_restart',
+            'delete_start':'','delete_end':'','keep_start':'','keep_end':'','content':alert.get('text',''),
+            'evidence':json.dumps(alert,ensure_ascii=False),
+            'program_decision':'evidenced_semantic_and_acoustic_review_required','actual_execution':'not_executed_in_analysis'})
     for x in retakes:
-        decision_rows.append({"candidate_id":x["id"],"candidate_type":"long_sentence_retake",
-            "delete_start":x.get("proposed_delete_start",""),"delete_end":x.get("proposed_delete_end",""),
-            "keep_start":x.get("last_attempt_start",""),"keep_end":x.get("last_attempt_end",""),
-            "content":x.get("first_attempt_text",""),"evidence":f"similarity={x.get('similarity','')}; gap={x.get('gap_seconds','')}s",
-            "program_decision":"local_audio_review_required",
-            "actual_execution":"not_executed_in_analysis"})
+        planned=x.get('proposed_delete_ranges') or [None]
+        for proposal in planned:
+            attempt_id=proposal['attempt_id'] if proposal else 'review'
+            kept=x.get('selection',{}).get('attempt_id')
+            attempt=next((a for a in x.get('attempts',[]) if a['id']==kept),{})
+            decision_rows.append({'candidate_id':x['id']+'_'+str(attempt_id),'candidate_type':'long_sentence_retake',
+                'delete_start':proposal['start'] if proposal else '', 'delete_end':proposal['end'] if proposal else '',
+                'keep_start':attempt.get('start',''),'keep_end':attempt.get('end',''),
+                'content':x.get('first_attempt_text',''),
+                'evidence':json.dumps({'group_id':x['id'],'attempt_id':attempt_id,'selection':x.get('selection'),
+                                      'semantic_warnings':x.get('semantic_warnings',[])},ensure_ascii=False),
+                'program_decision':'evidenced_semantic_and_acoustic_review_required',
+                'actual_execution':'not_executed_in_analysis'})
     for x in opening_restarts:
         decision_rows.append({"candidate_id":x["id"],"candidate_type":"opening_swallowed_restart",
             "delete_start":x.get("proposed_delete_start",""),"delete_end":x.get("proposed_delete_end",""),
@@ -660,9 +639,9 @@ def analyze(args: argparse.Namespace) -> int:
             'end':float(x['anomalous_token_end']),'kind':'long_opening_token','text':x['anomalous_token'],
             'review_required':True,'evidence':x})
     for x in candidates:
-        if x['decision'].startswith('proposed'):
+        if x.get('review_required'):
             alerts.append({'check_id':'breath_gaps','start':float(x['silence_start']),
-                'end':float(x['silence_end']),'kind':'pause_candidate','text':'',
+                'end':float(x['silence_end']),'kind':'word_silence_conflict' if x.get('word_conflicts') else 'pause_candidate','text':'',
                 'review_required':True,'evidence':x})
     for x in low:
         if float(x['end'])>float(x['start']):
@@ -681,12 +660,12 @@ def analyze(args: argparse.Namespace) -> int:
             'reason':'--single-pass; opening windows still required' if args.single_pass else 'same model cross-pass is not independent proof of clean speech'}}
     (out/'review-report.json').write_text(json.dumps(machine,ensure_ascii=False,indent=2),encoding='utf-8')
 
-    manifest={"source":str(source),"source_sha256":source_hash,"probe":meta,"stage":"analyze","source_modified":False,"model":args.model,"passes":1 if args.single_pass else 2,"parameters":{"silence_noise":args.silence_noise,"silence_min":args.silence_min,"propose_internal":args.propose_internal,"low_confidence":args.low_confidence,"retake_policy":args.retake_policy}}
+    manifest={"source":str(source),"source_sha256":source_hash,"probe":meta,"stage":"analyze","source_modified":False,"model":args.model,"passes":1 if args.single_pass else 2,"parameters":{"silence_noise":args.silence_noise,"silence_min":args.silence_min,"propose_internal":args.propose_internal,"low_confidence":args.low_confidence,"retake_policy":args.retake_policy},"reference_script_sha256":sha256(script_path) if script_path else None}
     (out/"analysis-manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8")
     summary={"source_duration_seconds":duration,"detected_word_count":len(words),"silence_candidate_count":len(candidates),"silence_proposed_range_count":len(proposed),"retake_group_count":len(retakes),"retake_proposed_range_count":len(retake_ranges),"opening_swallowed_restart_count":len(opening_restarts),"effective_opening_candidate_count":len(opening["alerts"]),"merged_proposed_range_count":len(merged_proposed),"proposed_delete_seconds":round(proposed_total,3),"estimated_original_speed_duration_seconds":round(estimated,3),"low_confidence_word_count":len(low),"repeat_candidate_count":len(repeats),"half_sentence_restart_candidate_count":len(fragment_restarts),"retake_policy":args.retake_policy,"human_listening":"not performed","editing_performed":False,"command_status":"completed","quality_status":machine["quality_status"],"detection_checks":machine["detection_checks"],"unresolved_alert_count":len(machine["alerts"])}
     (out/"analysis-summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
     transcript_text="\n".join(f"- {s['start']:.2f}–{s['end']:.2f}：{s['text'].strip()}" for s in main["segments"])
-    report=f"""# 口播原片分析报告\n\n## 范围\n\n本轮仅分析，没有剪切、变速、渲染或生成剪映工程。拟删区间须按当前流程模式完成证据审核；本报告记录机器分析，未进行主观听感验证。\n\n## 输入\n\n- 文件：`{source}`\n- SHA256：`{source_hash}`\n- 时长：{duration:.3f}秒\n- 本地ASR：faster-whisper {args.model} int8，{1 if args.single_pass else 2}路\n- 重录策略：`{args.retake_policy}`\n\n## 自动候选\n\n- 静音候选：{len(candidates)}处，其中{len(proposed)}处提出缩短\n- 连续重录组：{len(retakes)}组，其中{len(retake_ranges)}组达到机器高置信拟删条件\n- 开场异常长词候选：{len(opening_restarts)}组；有效发声开场多尺度候选：{len(opening["alerts"])}项（执行状态：{opening["status"]}）\n- 合并去重后的拟删区间：{len(merged_proposed)}处，共{proposed_total:.3f}秒\n- 原速预计时长：{estimated:.3f}秒\n- 低置信词：{len(low)}项\n- 近距离重复表达候选：{len(repeats)}项\n\n详细静音区间见 `silence-candidates.csv`，长句重录组见 `retake-candidates.csv`，开场吞并候选见`opening-retake-candidates.csv`，其他文字疑点见 `review-items.csv`。`last_complete`只提出候选，最后一次完整性仍须结合局部分窗、声学边界及上下文完成 AI 核对，不能只凭候选自动通过。\n\n## 主转写\n\n{transcript_text}\n\n## 状态\n\n- 哈希、媒体参数、波形、逐词时间、静音候选、重录候选：已生成\n- 机器词时序与边界证据：见 review-report.json；主观听感未验证，且不是必需条件\n- 实际剪辑：未执行\n"""
+    report=f"""# 口播原片分析报告\n\n## 范围\n\n本轮仅分析，没有剪切、变速、渲染或生成剪映工程。拟删区间须按当前流程模式完成证据审核；本报告记录机器分析，未进行主观听感验证。\n\n## 输入\n\n- 文件：`{source}`\n- SHA256：`{source_hash}`\n- 时长：{duration:.3f}秒\n- 本地ASR：faster-whisper {args.model} int8，{1 if args.single_pass else 2}路\n- 重录策略：`{args.retake_policy}`\n\n## 自动候选\n\n- 静音候选：{len(candidates)}处，其中{len(proposed)}处提出缩短\n- 连续重录组：{len(retakes)}组，其中{len(retake_ranges)}组为文本等价拟删范围，仍待语义和边界审核\n- 开场异常长词候选：{len(opening_restarts)}组；有效发声开场多尺度候选：{len(opening["alerts"])}项（执行状态：{opening["status"]}）\n- 合并去重后的拟删区间：{len(merged_proposed)}处，共{proposed_total:.3f}秒\n- 原速预计时长：{estimated:.3f}秒\n- 低置信词：{len(low)}项\n- 近距离重复表达候选：{len(repeats)}项\n\n详细静音区间见 `silence-candidates.csv`，长句重录组见 `retake-candidates.csv`，开场吞并候选见`opening-retake-candidates.csv`，其他文字疑点见 `review-items.csv`。`last_complete`只提出候选，最后一次完整性仍须结合局部分窗、声学边界及上下文完成 AI 核对，不能只凭候选自动通过。\n\n## 主转写\n\n{transcript_text}\n\n## 状态\n\n- 哈希、媒体参数、波形、逐词时间、静音候选、重录候选：已生成\n- 机器词时序与边界证据：见 review-report.json；主观听感未验证，且不是必需条件\n- 实际剪辑：未执行\n"""
     report += f"\n- 命令执行：completed；质量状态：{machine['quality_status']}；未解决警报：{len(machine['alerts'])}\n- 有效开场分窗：{opening['status']}；策略 none 不关闭检测。\n- 每项执行范围及原因见 review-report.json；零候选不能代替有证据的 AI 质检；机器疑点须逐项处理。\n"
     (out/"analysis-report.md").write_text(report,encoding="utf-8")
     print(json.dumps({"output_dir":str(out),"summary":summary},ensure_ascii=False,indent=2))
@@ -831,17 +810,24 @@ def rough_cut(args: argparse.Namespace) -> int:
             if not row.get("delete_start") or not row.get("delete_end"):
                 raise SystemExit(f"approved candidate has no executable range: {row.get('candidate_id')}")
             cut_start=float(row["delete_start"]); cut_end=float(row["delete_end"])
+            authorized_start,authorized_end=cut_start,cut_end
             if row.get("acoustic_evidence"):
                 evidence_path=Path(row["acoustic_evidence"]).expanduser()
                 if not evidence_path.is_absolute(): evidence_path=decision_path.parent/evidence_path
                 evidence=json.loads(evidence_path.read_text(encoding="utf-8-sig"))
                 if evidence.get("source_sha256")!=source_hash or evidence.get("status")!="verified_acoustic_bounds":
                     raise SystemExit("acoustic evidence must be source-bound and explicitly verified")
-                cut_start=frame_safe_retake_cut_start(float(evidence["previous_word_end"]),float(evidence["failed_audio_onset"]),float(Fraction(output_fps)))
-                if math.ceil(cut_end*float(Fraction(output_fps))-1e-8)/float(Fraction(output_fps))>float(evidence["last_complete_audio_onset"]):
+                safe_start=frame_safe_retake_cut_start(float(evidence["previous_word_end"]),float(evidence["failed_audio_onset"]),float(Fraction(output_fps)))
+                if safe_start < cut_start-1e-8:
+                    raise SystemExit('acoustic start expands the approved deletion; update and review the decision table first')
+                cut_start=safe_start
+                actual_end=float(Fraction(math.floor(Fraction(str(cut_end))*Fraction(output_fps)))/Fraction(output_fps))
+                if actual_end>float(evidence["last_complete_audio_onset"]):
                     raise SystemExit("frame-quantized delete end overlaps the last complete take's measured onset")
                 boundary_evidence.append({"candidate_id":row["candidate_id"],"evidence":str(evidence_path),
-                                          "evidence_sha256":sha256(evidence_path),"resolved_start":cut_start})
+                                          "evidence_sha256":sha256(evidence_path),"resolved_start":cut_start,
+                                          "authorized_start":authorized_start,"authorized_end":authorized_end,
+                                          "acoustic_start_adjustment":cut_start-authorized_start})
             elif row.get("candidate_type") in ("short_fragment_or_swallowed_restart","opening_swallowed_restart","long_sentence_retake"):
                 raise SystemExit("retake execution requires source-bound acoustic_evidence; ASR similarity is not a cut boundary")
             deletes.append((cut_start,cut_end,
@@ -858,15 +844,17 @@ def rough_cut(args: argparse.Namespace) -> int:
             raise SystemExit("decision contains an invalid source deletion range")
     for i in range(1,len(deletes)):
         if deletes[i][0] < deletes[i-1][1]: raise SystemExit("confirmed delete ranges overlap")
+    try:
+        deletes,quantization_audit=quantize_deletions(deletes,output_fps,duration)
+    except ValueError as error:
+        raise SystemExit(str(error))
     kept=[]; cursor=0.0
     for start,end,reason in deletes:
         if start>cursor: kept.append((cursor,start))
         cursor=end
     if cursor<duration: kept.append((cursor,duration))
     if not kept: raise SystemExit("confirmed ranges delete the entire source")
-    # Quantize shared audio/video trims to the same source frame grid.
-    fps_value=float(Fraction(output_fps))
-    kept=[(math.ceil(a*fps_value-1e-8)/fps_value,min(duration,math.ceil(b*fps_value-1e-8)/fps_value)) for a,b in kept]
+    # Both streams use the same already-quantized, inward-only removal ranges.
     kept=[(a,b) for a,b in kept if b>a]
     if not kept: raise SystemExit("no source frame remains")
     out.mkdir(parents=True,exist_ok=True)
@@ -880,6 +868,7 @@ def rough_cut(args: argparse.Namespace) -> int:
     run(["ffmpeg","-y","-hide_banner","-loglevel","error","-i",str(source),"-filter_complex",graph,
          "-map","[v]","-map","[a]","-r",output_fps,"-c:v","libx264","-crf",str(args.crf),"-preset",args.preset,
          "-pix_fmt","yuv420p","-c:a","aac","-b:a","192k","-ar","48000","-movflags","+faststart",str(media)],capture=False)
+    (out/'cut-quantization.json').write_text(json.dumps(quantization_audit,ensure_ascii=False,indent=2),encoding='utf-8')
     mapped=[]; out_cursor=0.0
     for start,end in kept:
         mapped.append({"source_start":round(start,6),"source_end":round(end,6),"output_start":round(out_cursor,6),"output_end":round(out_cursor+end-start,6)})
@@ -988,7 +977,26 @@ def captions_stage(args: argparse.Namespace) -> int:
     duration=float(probe(source)["format"]["duration"])
     timing=source_relative_word_evidence(transcript_word_records(transcript),0,window_end=duration,window_id='caption_source')
     words=timing['words']
+    audio=out/'caption-audio-16k.wav'
+    extract_audio(source,audio)
+    quiet=run(['ffmpeg','-hide_banner','-i',str(audio),'-af','silencedetect=noise=-42dB:d=0.12','-f','null','-'])
+    quiet_intervals=parse_silence(quiet.stderr,duration)
+    review_path=getattr(args,'timing_review',None)
+    review_data=json.loads(review_path.read_text(encoding='utf-8-sig')) if review_path else {}
+    timing_review=review_caption_timing(words,duration=duration,source_sha256=sha256(source),
+        silences=quiet_intervals,local_reviews=review_data.get('local_reviews',[]),
+        onset_evidence=review_data.get('onset_evidence',[]),base_dir=review_path.parent if review_path else out)
+    (out/'caption-timing-review.json').write_text(json.dumps(timing_review,ensure_ascii=False,indent=2),encoding='utf-8')
+    words=timing_review['words']
+    layout_path=getattr(args,'caption_layout',None)
+    trusted_layout=json.loads(layout_path.read_text(encoding='utf-8-sig')) if layout_path else None
+    layout=plan_caption_layout(chunks,words=words,max_chars=args.max_chars,trusted_layout=trusted_layout)
+    chunks=layout['chunks']
     rows,validation=align_caption_words(chunks,words)
+    validation['timing_review']=timing_review
+    validation['layout_review']=layout
+    if timing_review['quality_status']!='machine_checked' or layout['status']!='ready':
+        validation['status']='blocked'
     validation['timing_unverified']=timing['timing_unverified']
     validation.update({"source_sha256":sha256(source),"script_sha256":sha256(script_path),
                        "transcript_sha256":sha256(out/"caption-transcript.json")})
@@ -996,12 +1004,12 @@ def captions_stage(args: argparse.Namespace) -> int:
     try:
         from PIL import ImageFont
         font=ImageFont.truetype(str(args.font_file.expanduser().resolve()),args.font_size)
-        widths=[{"text":text,"width":font.getlength(text),"visible_bbox":list(font.getbbox(text))} for text in chunks]
+        widths=[{"text":text,"width":font.getlength(text),"visible_bbox":list(font.getbbox(text))} for chunk in chunks for text in chunk.splitlines()]
         validation["width_checks"]=widths
         validation["width_overflow"]=[x for x in widths if x["width"]>args.canvas_width-2*args.margin]
     except (ImportError,OSError) as error:
         validation["font_measurement_error"]=str(error); validation["status"]="blocked"
-    validation["long_lines"]=[x for x in chunks if len(clean_token(x))>args.max_chars]
+    validation["long_lines"]=[line for x in chunks for line in x.splitlines() if len(clean_token(line))>args.max_chars]
     validation["isolated_han_lines"]=[x for x in chunks if len(clean_token(x))==1 and re.search(r"[\u4e00-\u9fff]",x)]
     if validation["invalid_word_ranges"] or validation.get("width_overflow") or ((validation["long_lines"] or validation["isolated_han_lines"]) and not args.allow_long_lines):
         validation["status"]="blocked"
@@ -1018,7 +1026,8 @@ def captions_stage(args: argparse.Namespace) -> int:
     zero_events=sum(math.ceil(x["display_start"]*100-1e-8)>=math.ceil(x["display_end"]*100-1e-8) for x in connected)
     validation.update({"events":len(connected),"overlaps":export_overlaps,"zero_length_export_events":zero_events,
                        "anticipation_seconds":max([max(0,x["word_start"]-math.ceil(x["display_start"]*100-1e-8)/100) for x in connected],default=0),
-                       "onset_status":"machine word timestamps only; acoustic onsets not verified"})
+                       "onset_status":"local evidence reviewed where supplied; uncovered onsets are not certified",
+                       "onset_review_scope":timing_review["scope"]})
     if export_overlaps or zero_events:
         validation["status"]="blocked"; report_path.write_text(json.dumps(validation,indent=2),encoding="utf-8"); return 2
     srt=[]
@@ -1167,12 +1176,17 @@ def automatic_execution_errors(args, config, report_path=None):
     # paths may be derived by the agent when not fixed in those settings.
     fixed=config.get('pipeline',{}).get(args.stage,{})
     non_settings={'source','output','output_dir','output_name','analysis_dir','approval_report','decision_report',
-                  'decision_file','confirmed_delete','approve_candidate','project_config','overwrite'}
+                  'decision_file','confirmed_delete','approve_candidate','project_config','overwrite','cpu_threads'}
     for key in fixed:
         if key not in non_settings and hasattr(args,key):
-            actual=getattr(args,key);expected=fixed[key]
+            actual=normalize_setting_value(key,getattr(args,key));expected=normalize_setting_value(key,fixed[key])
             if isinstance(actual,Path):
                 equal=expected is not None and actual.expanduser().resolve()==Path(expected).expanduser().resolve()
+            elif key=='fps' and actual is not None and expected is not None:
+                equal=Fraction(str(actual))==Fraction(str(expected))
+            elif type(actual) in (int,float) and isinstance(expected,str):
+                try:equal=type(actual)(expected)==actual
+                except ValueError:equal=False
             else:equal=actual==expected
             if not equal:errors.append('full_auto command differs from authorized setting: '+key)
     if args.stage=='preview' and config.get('pipeline',{}).get('captions',{}).get('font_file'):
@@ -1204,11 +1218,19 @@ def decision_review_inputs(args):
 
 
 def main() -> int:
+    # Deterministic UTF-8 JSON when Windows redirects stdout using a legacy code page.
+    for stream in (sys.stdout,sys.stderr):
+        if hasattr(stream,'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     raw=sys.argv[1:]
     if "jianying-project" in raw:
         index=raw.index("jianying-project"); forwarded=raw[index+1:]
-        if "--project-config" in raw[:index]:
-            ci=raw.index("--project-config"); forwarded += raw[ci:ci+2]
+        if not any(x == '--project-config' or x.startswith('--project-config=') for x in forwarded):
+            for ci,value in enumerate(raw[:index]):
+                if value.startswith('--project-config='):
+                    forwarded += [value]
+                elif value == '--project-config' and ci+1 < index:
+                    forwarded += raw[ci:ci+2]
         adapter=Path(__file__).with_name("jianying_adapter.py")
         if not adapter.is_file():
             print(json.dumps({"status":"blocked","reason":"native project adapter is unavailable"})); return 2
@@ -1219,8 +1241,9 @@ def main() -> int:
     a=sub.add_parser("analyze",help="read-only local analysis")
     a.add_argument("--source",required=True,type=Path); a.add_argument("--output-dir",required=True,type=Path)
     a.add_argument("--model",default=os.environ.get("XX3ZDJJ_MODEL_PATH","medium")); a.add_argument("--cpu-threads",type=int,default=4)
-    a.add_argument("--silence-noise",default="-42dB"); a.add_argument("--silence-min",type=float,default=0.35)
-    a.add_argument("--propose-internal",type=float,default=1.20); a.add_argument("--low-confidence",type=float,default=0.55)
+    a.add_argument("--silence-noise",default="-42dB"); a.add_argument("--silence-min",type=float,default=0.12)
+    a.add_argument("--propose-internal",type=float,default=0.30); a.add_argument("--low-confidence",type=float,default=0.55)
+    a.add_argument("--script",type=Path,help="optional reference transcript for retake comparison; never substitutes for spoken evidence")
     a.add_argument("--retake-policy",choices=("none","last_complete"),default="none")
     a.add_argument("--single-pass",action="store_true"); a.add_argument("--resume",action="store_true")
     r=sub.add_parser("rough-cut",help="render an explicitly authorized original-speed rough cut")
@@ -1238,6 +1261,8 @@ def main() -> int:
     c.add_argument("--model",default=os.environ.get("XX3ZDJJ_MODEL_PATH","medium")); c.add_argument("--cpu-threads",type=int,default=4); c.add_argument("--max-chars",type=int,default=11)
     c.add_argument("--font-name",required=True); c.add_argument("--font-file",required=True,type=Path); c.add_argument("--font-size",type=int,default=86)
     c.add_argument("--pos-x",type=int,default=540); c.add_argument("--pos-y",type=int,default=1075); c.add_argument("--style-status",default="provisional")
+    c.add_argument("--timing-review",type=Path,help="source-bound local word timing review references and measured onsets")
+    c.add_argument("--caption-layout",type=Path,help="reviewed semantic event strings; preserves every character")
     c.add_argument("--transcript",type=Path,help="existing corrected word transcript with matching source_sha256")
     c.add_argument("--canvas-width",type=int,default=1080); c.add_argument("--canvas-height",type=int,default=1920)
     c.add_argument("--margin",type=int,default=60); c.add_argument("--max-gap",type=float,default=.35)

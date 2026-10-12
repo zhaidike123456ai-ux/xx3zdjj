@@ -6,6 +6,8 @@ Legacy reports use semi_auto. Frozen snapshots are offline validation only.
 import copy
 import hashlib
 import json
+import math
+from fractions import Fraction
 from pathlib import Path
 
 REQUIRED_CHOICES = ('retake_policy', 'font_name', 'mask_shape', 'background',
@@ -13,6 +15,19 @@ REQUIRED_CHOICES = ('retake_policy', 'font_name', 'mask_shape', 'background',
 AUDIO_METHODS = {'agent_audio_listening': 'audio_listening',
                  'agent_av_review': 'audio_video_review'}
 STATIC_METHODS = {'static_inspection', 'combined_evidence_review', 'structural_review', 'machine_evidence_review'}
+SETTINGS_DIGEST_VERSION = 2
+# These affect where/how a job runs, not what the user asked to produce. Keep
+# model, source, decisions, assets and every other setting bound by default.
+RUNTIME_SETTINGS = frozenset({'output', 'output_dir', 'output_name', 'cpu_threads',
+                              'overwrite', 'resume'})
+AUDIT_SETTINGS = frozenset({'settings_history', 'audit_log', 'updated_at', 'last_updated_at'})
+_CHOICE_AUDIT = frozenset({'evidence', 'at', 'origin', 'preference_id'})
+_INTEGER_SETTINGS = frozenset({'font_size', 'max_chars', 'pos_x', 'pos_y', 'canvas_width',
+    'canvas_height', 'margin', 'mask_center_x', 'mask_center_y', 'mask_diameter',
+    'subject_crop_y', 'corner_radius', 'crf', 'cpu_threads'})
+_FLOAT_SETTINGS = frozenset({'background_speed', 'max_gap', 'silence_min', 'propose_internal',
+    'low_confidence', 'speed', 'speed_px_s', 'speed_px_per_second'})
+_BOOLEAN_SETTINGS = frozenset({'overwrite', 'resume', 'single_pass', 'allow_long_lines', 'render_preview'})
 
 
 def file_hash(path):
@@ -48,11 +63,137 @@ def _path(value, base):
     return path.resolve() if path.is_absolute() else (Path(base) / path).resolve()
 
 
-def settings_digest(settings):
-    """Bind all effective settings, including confirmed choices, except workflow state."""
+def normalize_setting_value(key, value):
+    """Canonicalize documented parameter types without changing content choices.
+
+    Shared with CLI default loading/comparison. Unknown keys remain bound; this
+    is deliberately not a blanket coercion of strings, paths or nested values.
+    """
+    name = key.rsplit('.', 1)[-1]
+    if value is None:
+        return None
+    if name in _INTEGER_SETTINGS | _FLOAT_SETTINGS:
+        if isinstance(value, bool):
+            raise ValueError(f'{key} must be numeric, not boolean')
+        number = float(value)
+        if not math.isfinite(number) or name in _INTEGER_SETTINGS and not number.is_integer():
+            raise ValueError(f'{key} needs a finite ' + ('integer' if name in _INTEGER_SETTINGS else 'number'))
+        return int(number) if number.is_integer() else number
+    if name in _BOOLEAN_SETTINGS:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.lower() in ('true', 'false'):
+            return value.lower() == 'true'
+        raise ValueError(f'{key} must be true or false')
+    if name == 'fps':
+        try:
+            rate = Fraction(str(value))
+        except (ValueError, ZeroDivisionError) as error:
+            raise ValueError('fps must be a positive finite rate') from error
+        if rate <= 0:
+            raise ValueError('fps must be positive')
+        return str(rate)
+    if name == 'mask_shape' and isinstance(value, str):
+        return value.replace('-', '_')
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: normalize_setting_value(k, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [normalize_setting_value('', v) for v in value]
+    return copy.deepcopy(value)
+
+
+def normalize_stage_settings(settings):
+    if not isinstance(settings, dict):
+        raise ValueError('pipeline stage settings must be an object')
+    return {key: normalize_setting_value(key, value) for key, value in settings.items()
+            if key not in RUNTIME_SETTINGS and key not in AUDIT_SETTINGS}
+
+
+def stage_settings_digest(settings):
+    """Version 2 artifact binding: stable stage settings, excluding job paths."""
+    return _digest(normalize_stage_settings(settings))
+
+
+def normalized_choices(choices):
+    if not isinstance(choices, dict):
+        raise ValueError('confirmed choices must be an object')
+    result = {}
+    for key, value in choices.items():
+        if key.startswith('pipeline.') and key.rsplit('.', 1)[-1] in RUNTIME_SETTINGS | AUDIT_SETTINGS:
+            continue
+        if key.startswith(('pipeline.', 'editing.', 'delivery.')) and isinstance(value, dict) and 'value' in value:
+            result[key] = {name: (normalize_setting_value(key, item) if name == 'value' else copy.deepcopy(item))
+                           for name, item in value.items() if name not in _CHOICE_AUDIT}
+        else:
+            result[key] = normalize_setting_value(key, value)
+    return result
+
+
+def settings_digest(settings, version=SETTINGS_DIGEST_VERSION):
+    """Versioned effective-setting binding. No-version old authorizations use v1."""
     if not isinstance(settings, dict):
         raise ValueError('settings must be an object')
-    return _digest({key: value for key, value in settings.items() if key != 'workflow'})
+    if type(version) is not int:
+        raise ValueError('settings digest version must be an integer')
+    values = {key: value for key, value in settings.items() if key != 'workflow'}
+    if version == 1:
+        return _digest(values)
+    if version != SETTINGS_DIGEST_VERSION:
+        raise ValueError('unsupported settings digest version')
+    values = {key: copy.deepcopy(value) for key, value in values.items() if key not in AUDIT_SETTINGS}
+    if 'pipeline' in values:
+        stages = {stage: normalize_stage_settings(config) for stage, config in values['pipeline'].items()}
+        # Adding a job directory for a previously absent stage does not add an
+        # effective setting. Both absent and empty stages use the same defaults.
+        values['pipeline'] = {stage: config for stage, config in stages.items() if config}
+    if 'confirmed_choices' in values:
+        values['confirmed_choices'] = normalized_choices(values['confirmed_choices'])
+    return _digest(values)
+
+
+def preserve_legacy_settings_binding(settings, *, base_dir):
+    """Keep an authenticated v1 baseline before a harmless settings mutation.
+
+    No consent is created and the immutable authorization is not rewritten. The
+    old digest authenticates this snapshot; v2 comparison then permits only the
+    narrowly documented runtime/audit/type normalization differences.
+    """
+    workflow = settings.get('workflow', {})
+    reference = workflow.get('authorization')
+    if workflow.get('mode') != 'full_auto' or not isinstance(reference, dict):
+        return False
+    errors = []
+    path = _check_ref(reference, base_dir, 'legacy authorization', errors)
+    if path is None:
+        return False
+    auth = _read(path)
+    if auth.get('settings_digest_version', 1) != 1:
+        return False
+    if auth.get('settings_digest') != settings_digest(settings, version=1):
+        return False
+    workflow['legacy_settings_binding'] = {
+        'authorization_sha256': reference['sha256'],
+        'authorized_settings': copy.deepcopy({k: v for k, v in settings.items() if k != 'workflow'}),
+        'comparison_version': SETTINGS_DIGEST_VERSION,
+    }
+    return True
+
+
+def _settings_binding_matches(auth, settings, authorization_hash):
+    version = auth.get('settings_digest_version', 1)
+    if auth.get('settings_digest') == settings_digest(settings, version=version):
+        return True
+    if version != 1:
+        return False
+    migration = settings.get('workflow', {}).get('legacy_settings_binding', {})
+    baseline = migration.get('authorized_settings')
+    return (migration.get('authorization_sha256') == authorization_hash
+            and migration.get('comparison_version') == SETTINGS_DIGEST_VERSION
+            and isinstance(baseline, dict)
+            and auth.get('settings_digest') == settings_digest(baseline, version=1)
+            and settings_digest(baseline) == settings_digest(settings))
 
 
 def validate_choices(choices):
@@ -120,6 +261,7 @@ def create_authorization(settings, sources, choices, evidence_file, *, message,
     result = {'schema_version': 1, 'kind': 'xx3zdjj_full_auto_authorization',
               'mode': 'full_auto', 'run_id': workflow['run_id'],
               'revision': workflow.get('revision', 0),
+              'settings_digest_version': SETTINGS_DIGEST_VERSION,
               'settings_digest': settings_digest(settings),
               'choices': copy.deepcopy(choices), 'choices_digest': _digest(choices),
               'sources': source_refs,
@@ -220,12 +362,14 @@ def resolve_workflow(workflow_record, report_base, project_config=None, *, live_
             errors.append('invalid full_auto authorization schema')
         if not _text(workflow.get('run_id')) or auth.get('run_id') != workflow.get('run_id') or auth.get('revision') != workflow.get('revision', 0):
             errors.append('authorization belongs to a different run or revision')
-        if auth.get('settings_digest') != settings_digest(settings):
+        if not _settings_binding_matches(auth, settings, auth_ref['sha256']):
             errors.append('effective settings changed since authorization')
         choices = auth.get('choices')
         errors.extend(validate_choices(choices))
         confirmed = settings.get('confirmed_choices', {})
-        if not isinstance(confirmed, dict) or not isinstance(choices, dict) or any(confirmed.get(key) != value for key, value in choices.items()) or auth.get('choices_digest') != _digest(choices):
+        if (not isinstance(confirmed, dict) or not isinstance(choices, dict)
+                or any(normalized_choices(confirmed).get(key) != value for key, value in normalized_choices(choices).items())
+                or auth.get('choices_digest') != _digest(choices)):
             errors.append('authorized initial choices changed or are inconsistent')
         if not frozen and isinstance(choices, dict):
             for key in ('background', 'font_asset'):

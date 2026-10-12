@@ -64,11 +64,20 @@ class StageGateTests(unittest.TestCase):
         self.residual_data['checks']['repeated_speech']['result'] = 'review_required'
         self.residual_path.write_text(json.dumps(self.residual_data), encoding='utf-8')
         self.data['residual_review']['report']['sha256'] = file_hash(self.residual_path)
+        coverage = {'scope': 'alert_window', 'start': .2, 'end': .4}
+        (self.root / 'evidence.txt').write_text(json.dumps({
+            'schema_version': 2, 'kind': 'machine_verification',
+            'source_sha256': file_hash(self.source), 'report_sha256': file_hash(self.residual_path),
+            'alert_id': 'synthetic-machine-alert', 'coverage': coverage, 'verification': 'confirmed_benign',
+            'observations': [{'method': 'synthetic timing and mapping comparison',
+                              'finding': 'SYNTHETIC fixture: the 0.2-0.4 second alert window maps to retained normal repetition; not real speech acceptance.'}]
+        }), encoding='utf-8')
         resolution = self.root / 'machine-resolutions.json'
         resolution.write_text(json.dumps({
-            'schema_version': 1, 'report_sha256': file_hash(self.residual_path),
+            'schema_version': 2, 'report_sha256': file_hash(self.residual_path),
             'source_sha256': file_hash(self.source), 'check_resolutions': [], 'alerts': [{
-                'alert_id': 'synthetic-machine-alert', 'outcome': 'false_positive',
+                'alert_id': 'synthetic-machine-alert', 'decision': 'retain',
+                'verification': 'confirmed_benign', 'coverage': coverage,
                 'assessment': 'Synthetic machine timing comparison; no listening claim.',
                 'reviewer': {'kind': 'agent', 'method': 'machine_evidence_review',
                              'recorded_at': 'synthetic time', 'quote': 'Synthetic review fixture.'},

@@ -6,10 +6,12 @@ unsupported until approved audio/render equivalence can be demonstrated.
 """
 import argparse
 import copy
+import configparser
 from fractions import Fraction
 import hashlib
 import html
 import json
+import sys
 import math
 import os
 from pathlib import Path
@@ -25,6 +27,89 @@ from stage_gate import file_hash, validate_report
 
 ASSETS = Path(__file__).resolve().parents[1] / 'assets' / 'jianying'
 FONT_SUFFIXES = {'.otf', '.ttf', '.ttc', '.woff', '.woff2'}
+DEFAULT_SHADOW = {'enabled': True, 'diffuse': .025, 'alpha': 1., 'distance': 5.,
+                  'angle': -45., 'color': [0., 0., 0.]}
+DRAFT_CONFIG_FIELDS = {'draft_root_path', 'draft_path', 'draft_save_path',
+                       'draft_save_dir', 'draft_directory', 'draft_dir', 'draft_root'}
+MAX_CONFIG_BYTES = 128 * 1024
+MAX_KNOWN_CONFIG_FILES = 64
+
+
+def normalized_shadow(value=None):
+    if value is None:
+        return copy.deepcopy(DEFAULT_SHADOW)
+    need(isinstance(value, dict), 'caption shadow must be an explicit object')
+    need(not (set(value)-set(DEFAULT_SHADOW)), 'Unknown caption shadow parameter')
+    result = dict(copy.deepcopy(DEFAULT_SHADOW), **value)
+    need(type(result['enabled']) is bool, 'Shadow enabled must be boolean')
+    for key in ('diffuse','alpha','distance','angle'):
+        need(type(result[key]) in (int,float) and math.isfinite(result[key]), 'Non-finite shadow parameter: '+key)
+        result[key] = float(result[key])
+    need(0 <= result['diffuse'] <= 1 and 0 <= result['alpha'] <= 1 and result['distance'] >= 0,
+         'Invalid shadow blur, opacity or distance')
+    color = result['color']
+    need(isinstance(color,(list,tuple)) and len(color)==3 and
+         all(type(v) in (int,float) and math.isfinite(v) and 0 <= v <= 1 for v in color), 'Invalid shadow RGB color')
+    result['color'] = [float(v) for v in color]
+    return result
+
+
+def native_shadows(shadow):
+    if not shadow['enabled']:
+        return []
+    return [dict(diffuse=shadow['diffuse'],alpha=shadow['alpha'],distance=shadow['distance'],
+        content=dict(solid=dict(color=shadow['color'])),angle=shadow['angle'])]
+
+
+def caption_style_record(caption, target_platform, base, check_evidence=True):
+    """Resolve explicit/native-unit shadow plus honest reusable calibration metadata.
+
+    style_profile is an inline object in the version-bound timeline. A calibrated
+    profile needs platform/app/font versions and hashed non-font evidence. Its
+    history never attests current pixel equivalence or current App/font matching.
+    """
+    profile = caption.get('style_profile', {})
+    need(isinstance(profile,dict), 'caption style_profile must be an inline object')
+    profile_shadow = normalized_shadow(profile.get('shadow'))
+    if 'shadow' in caption:
+        shadow = normalized_shadow(caption['shadow']); source = 'caption.shadow'
+    elif 'shadow' in profile:
+        shadow = profile_shadow; source = 'style_profile.shadow'
+    else:
+        shadow = normalized_shadow(); source = 'legacy_default'
+    calibration = profile.get('calibration', {})
+    need(isinstance(calibration,dict), 'style calibration must be an object')
+    declared = calibration.get('status', 'unverified')
+    need(declared in ('unverified','calibrated'), 'Unknown style calibration status')
+    evidence = calibration.get('evidence', [])
+    need(isinstance(evidence,list), 'Style calibration evidence must be a list')
+    if declared == 'calibrated':
+        for key in ('platform','app_version','font_name','font_version'):
+            need(isinstance(calibration.get(key),str) and calibration[key].strip(), 'Calibrated style missing '+key)
+        need(calibration['platform'] in ('mac','windows'), 'Calibrated style platform must be mac or windows')
+        need(bool(evidence), 'Calibrated style needs actual hashed evidence')
+    for item in evidence:
+        need(isinstance(item,dict) and isinstance(item.get('path'),str) and item['path'] and
+             isinstance(item.get('sha256'),str) and re.fullmatch('[0-9a-f]{64}',item['sha256']),
+             'Invalid style calibration evidence reference')
+        origin = resolved(base,item['path'])
+        need(origin.suffix.lower() not in FONT_SUFFIXES, 'Font binaries cannot be calibration evidence copies')
+        if check_evidence:
+            need(origin.is_file() and file_hash(origin)==item['sha256'], 'Style calibration evidence missing or changed')
+    matching_parameters = shadow == profile_shadow
+    recorded = declared=='calibrated' and calibration.get('platform')==target_platform and matching_parameters
+    reasons = []
+    if declared=='calibrated' and calibration.get('platform') != target_platform:
+        reasons.append('historical platform differs from target')
+    if declared=='calibrated' and not matching_parameters:
+        reasons.append('explicit shadow differs from calibrated profile')
+    return dict(shadow=shadow, shadow_source=source,
+        calibration=dict(status='historical_evidence_recorded' if recorded else 'unverified',
+            declared_status=declared, platform=calibration.get('platform'), app_version=calibration.get('app_version'),
+            font_name=calibration.get('font_name'), font_version=calibration.get('font_version'),
+            evidence=copy.deepcopy(evidence), reasons=reasons),
+        current_app_font_match='unverified', pixel_equivalence='unverified')
+
 
 
 def uid():
@@ -68,7 +153,7 @@ def probe(path, executable=None):
     ffprobe = executable or os.environ.get('XX3ZDJJ_FFPROBE') or shutil.which('ffprobe')
     need(ffprobe, 'FFprobe not found; discover/install approved compatible tools first')
     return json.loads(subprocess.check_output([str(ffprobe), '-v', 'error', '-count_frames',
-        '-show_streams', '-show_format', '-of', 'json', str(path)], text=True))
+        '-show_streams', '-show_format', '-of', 'json', str(path)], text=True, encoding="utf-8", errors="strict"))
 
 
 def audio_signature(path, executable=None):
@@ -77,7 +162,7 @@ def audio_signature(path, executable=None):
     data=json.loads(subprocess.check_output([str(ffprobe), '-v','error','-select_streams','a',
         '-show_streams','-show_packets','-show_data_hash','sha256','-show_entries',
         'stream=codec_name,sample_rate,channels,channel_layout:packet=pts_time,dts_time,duration_time,size,data_hash',
-        '-of','json',str(path)],text=True))
+        '-of','json',str(path)],text=True,encoding='utf-8',errors='strict'))
     need(len(data.get('streams',[]))==1 and data.get('packets'), 'Exactly one approved audio stream required')
     return hashlib.sha256(json.dumps(data,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
@@ -245,6 +330,7 @@ def build(timeline, approval_report, output, name, target_platform, registered_r
     safe_name(name)
     need(target_platform in {'mac','windows'}, 'Select mac or windows')
     spec,bindings,rows,fps,count,duration=load_timeline(timeline,approval_report,ffprobe,project_config)
+    caption_style=caption_style_record(spec['layout']['caption'],target_platform,Path(timeline).resolve().parent)
     registered=(Path(registered_root).expanduser().resolve()/name) if registered_root else output
     content=read(ASSETS/'draft_content_template.json');meta=read(ASSETS/'draft_meta_info.json')
     did=uid();now=int(time.time()*1e6);layout=spec['layout'];W,H=layout['width'],layout['height']
@@ -281,7 +367,7 @@ def build(timeline, approval_report, output, name, target_platform, registered_r
     for row in rows:
         mid=uid();style=dict(fill=dict(alpha=1.,content=dict(render_type='solid',solid=dict(alpha=1.,color=[1.,1.,1.]))),
             range=[0,len(row['text'])],size=cc['size'],bold=bool(cc.get('bold',False)),italic=False,underline=False,strokes=[],
-            font=dict(id='',path=font_path),shadows=[dict(diffuse=.025,alpha=1.,distance=5.,content=dict(solid=dict(color=[0.,0.,0.])),angle=-45.)])
+            font=dict(id='',path=font_path),shadows=native_shadows(caption_style['shadow']))
         texts.append(dict(id=mid,content=json.dumps(dict(styles=[style],text=row['text']),ensure_ascii=False),typesetting=0,alignment=1,
                          letter_spacing=0.,line_spacing=.02,line_feed=0,line_max_width=1.,force_apply_line_max_width=False,check_flag=39,type='subtitle',global_alpha=1.))
         s,_=segment(mid,row['start'],row['end']-row['start'],2,text=True,x=(cc['center_x']-W/2)/(W/2),y=(H/2-cc['center_y'])/(H/2))
@@ -299,7 +385,7 @@ def build(timeline, approval_report, output, name, target_platform, registered_r
         registered_path=str(registered),fps=str(fps),frame_count=count,duration_us=duration,captions=len(rows),person_segments=len(person),resources=resources,
         approval_bindings={k:file_hash(v) for k,v in bindings.items()},approval_report_sha256=file_hash(approval_report),
         audio='Approved-clean embedded audio, speed1 volume1; background muted, no new effects/fades',font='Local reference only; no font copied. UI glyph/style validation pending.',
-        native_export='unverified',save_reopen='unverified',cross_computer='unverified')
+        caption_style=caption_style, native_export='unverified',save_reopen='unverified',cross_computer='unverified')
     output.parent.mkdir(parents=True,exist_ok=True)
     temp=Path(tempfile.mkdtemp(prefix='.native-build-',dir=output.parent))
     try:
@@ -310,6 +396,14 @@ def build(timeline, approval_report, output, name, target_platform, registered_r
         shutil.copy2(bindings['ass'],temp/'Evidence'/('captions.'+spec['captions']['format']))
         shutil.copy2(timeline,temp/'timeline.json');write(temp/'native-cut-map.json',cuts)
         shutil.copy2(approval_report,temp/'Evidence'/'approval-original.json')
+        snapshots=[]
+        for item in caption_style['calibration']['evidence']:
+            origin=resolved(Path(timeline).resolve().parent,item['path'])
+            need(file_hash(origin)==item['sha256'],'Calibration evidence changed during build')
+            evidence_name='caption-calibration-'+item['sha256']+origin.suffix
+            shutil.copy2(origin,temp/'Evidence'/evidence_name)
+            snapshots.append({'source_path':item['path'],'path':'Evidence/'+evidence_name,'sha256':item['sha256']})
+        caption_style['evidence_snapshots']=snapshots
         write(temp/filename,content);write(temp/'draft_meta_info.json',meta)
         write(temp/'generation-manifest.json',manifest)
         # Freeze evidence bytes, retaining references without inventing approvals.
@@ -372,6 +466,22 @@ def validate(project, native_report=None):
         need(len(ids)==len(set(ids)),'Duplicate IDs')
         need(len(content['tracks'])==3,'Expected background/person/caption tracks')
         bg,person,texts=content['tracks'];cursor=0
+        expected_caption_style=caption_style_record(spec['layout']['caption'],manifest['platform'],root,check_evidence=False)
+        recorded_style=manifest.get('caption_style')
+        if recorded_style is not None:
+            need(all(recorded_style.get(k)==v for k,v in expected_caption_style.items()),'Caption style/calibration record changed')
+            snapshots=recorded_style.get('evidence_snapshots',[])
+            refs=expected_caption_style['calibration']['evidence']
+            need(len(snapshots)==len(refs),'Calibration evidence snapshot incomplete')
+            for original,snapshot in zip(refs,snapshots):
+                need(snapshot.get('source_path')==original['path'] and snapshot.get('sha256')==original['sha256'],
+                     'Calibration snapshot belongs to another profile')
+                artifact=(root/snapshot['path']).resolve()
+                need(artifact.is_relative_to(root/'Evidence') and artifact.is_file() and file_hash(artifact)==snapshot['sha256'],
+                     'Calibration evidence snapshot missing or changed')
+        else:
+            need('shadow' not in spec['layout']['caption'] and 'style_profile' not in spec['layout']['caption'],
+                 'Explicit caption style record missing')
         expected=spec['keep_ranges'];need(len(person['segments'])==len(expected)==manifest['person_segments'],'Cut count mismatch')
         source_mid=content['materials']['videos'][0]['id']
         for s,kept in zip(person['segments'],expected):
@@ -397,6 +507,7 @@ def validate(project, native_report=None):
             cc=spec['layout']['caption'];W,H=spec['layout']['width'],spec['layout']['height']
             need(s['clip']['transform']==dict(x=(cc['center_x']-W/2)/(W/2),y=(H/2-cc['center_y'])/(H/2)),'Caption position changed')
             need(len(body['styles'])==1 and body['styles'][0]['size']==cc['size'] and body['styles'][0]['strokes']==[],'Caption style changed')
+            need(body['styles'][0].get('shadows')==native_shadows(expected_caption_style['shadow']),'Caption shadow changed')
         for r in manifest['resources']:
             p=(root/r['file']).resolve();need(p.is_relative_to(root) and p.is_file(),'Missing/escaping resource')
             need(file_hash(p)==r['sha256'],'Resource hash changed')
@@ -426,7 +537,69 @@ def validate(project, native_report=None):
             'note':'Static validation is not UI, native export, or cross-device proof.'}
 
 
-def discover(target_platform=None, app_path=None, draft_root=None):
+def _draft_fields(value, prefix='', depth=0):
+    if depth > 8:
+        return
+    if isinstance(value,dict):
+        for key,item in value.items():
+            field=re.sub(r'(?<=[a-z0-9])(?=[A-Z])','_',str(key)).lower().replace('-','_')
+            name=prefix+'.'+str(key) if prefix else str(key)
+            if field in DRAFT_CONFIG_FIELDS:
+                path=item.get('path') if isinstance(item,dict) else item
+                if isinstance(path,str) and path.strip():
+                    yield name,path
+            if isinstance(item,(dict,list)):
+                yield from _draft_fields(item,name,depth+1)
+    elif isinstance(value,list):
+        for index,item in enumerate(value[:1000]):
+            yield from _draft_fields(item,prefix+'['+str(index)+']',depth+1)
+
+
+def _config_draft_roots(files):
+    roots=[];diagnostics=[];seen=set()
+    for path,kind in files:
+        path=Path(path).expanduser().resolve()
+        if path in seen:continue
+        seen.add(path)
+        try:
+            need(path.is_file(),'config file missing')
+            need(path.stat().st_size<=MAX_CONFIG_BYTES,'config file exceeds bounded discovery size')
+            raw=path.read_bytes()
+            if raw.startswith((b'\xff\xfe',b'\xfe\xff')):
+                text=raw.decode('utf-16')
+            else:
+                try:text=raw.decode('utf-8-sig')
+                except UnicodeDecodeError:
+                    if path.suffix.lower()!='.ini':raise
+                    text=raw.decode('gb18030')
+            if path.suffix.lower()=='.ini':
+                parser=configparser.ConfigParser(interpolation=None,strict=False)
+                parser.optionxform=str
+                parser.read_string(text)
+                values={'DEFAULT':dict(parser.defaults()),**{name:dict(parser.items(name)) for name in parser.sections()}}
+            else:
+                values=json.loads(text)
+            for field,value in _draft_fields(values):
+                value=re.sub(r'%([^%]+)%',lambda match:os.environ.get(match.group(1),match.group(0)),value)
+                value=os.path.expandvars(value.strip())
+                if len(value)>=2 and value[0]==value[-1] and value[0] in ('\"',"'"):
+                    value=value[1:-1]
+                need(not re.search(r'[\x00-\x1f]',value),'configured path has control characters')
+                root=resolved(path.parent,value)
+                marker=root/'root_meta_info.json'
+                if root.is_dir() and marker.is_file():
+                    roots.append({'path':str(root),'source':kind+' configuration field',
+                                  'config_file':str(path),'config_field':field,'marker':str(marker),
+                                  'write_authorized':False})
+                else:
+                    diagnostics.append({'config_file':str(path),'field':field,
+                                        'reason':'configured directory or draft marker missing'})
+        except (OSError,ValueError,TypeError,configparser.Error) as error:
+            diagnostics.append({'config_file':str(path),'reason':str(error)})
+    return roots,diagnostics
+
+
+def discover(target_platform=None, app_path=None, draft_root=None, config_file=None):
     host='mac' if platform.system()=='Darwin' else 'windows' if platform.system()=='Windows' else platform.system().lower()
     chosen=target_platform or host;apps=[];roots=[]
     app_candidates=[Path(app_path).expanduser()] if app_path else []
@@ -446,24 +619,45 @@ def discover(target_platform=None, app_path=None, draft_root=None):
             # Parameter passed as env, never interpolated into PowerShell code.
             env=os.environ.copy();env['JY_DISCOVERY_APP']=str(app.resolve())
             try:
-                v=subprocess.check_output(['powershell','-NoProfile','-Command','(Get-Item -LiteralPath $env:JY_DISCOVERY_APP).VersionInfo.FileVersion'],env=env,text=True).strip()
+                v=subprocess.check_output(['powershell','-NoProfile','-Command','(Get-Item -LiteralPath $env:JY_DISCOVERY_APP).VersionInfo.FileVersion'],env=env,text=True,encoding='utf-8',errors='replace').strip()
                 item['version']=v or 'unknown'
             except (OSError,subprocess.SubprocessError):pass
         apps.append(item)
+    diagnostics=[]
     if draft_root:
         root=Path(draft_root).expanduser().resolve();need(root.is_dir(),'Explicit draft root does not exist')
         roots.append({'path':str(root),'source':'explicit override','write_authorized':False})
     else:
-        candidates=[]
-        if chosen=='mac':candidates=[Path.home()/'Movies'/n/'User Data'/'Projects'/'com.lveditor.draft' for n in ['JianyingPro','CapCut']]
+        bases=[]
+        if chosen=='mac':bases=[Path.home()/'Movies'/n/'User Data' for n in ['JianyingPro','CapCut']]
         elif chosen=='windows' and os.environ.get('LOCALAPPDATA'):
-            candidates=[Path(os.environ['LOCALAPPDATA'])/n/'User Data'/'Projects'/'com.lveditor.draft' for n in ['JianyingPro','CapCut']]
+            bases=[Path(os.environ['LOCALAPPDATA'])/n/'User Data' for n in ['JianyingPro','CapCut']]
+        explicit=[] if config_file is None else list(config_file) if isinstance(config_file,(list,tuple)) else [config_file]
+        files=[(Path(value),'explicit') for value in explicit]
+        for base in bases:
+            directory=base/'Config'
+            if not directory.is_dir():continue
+            found=sorted((path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in ('.json','.ini')),key=lambda path:path.name.lower())
+            files.extend((path,'known User Data/Config') for path in found[:MAX_KNOWN_CONFIG_FILES])
+            if len(found)>MAX_KNOWN_CONFIG_FILES:
+                diagnostics.append({'config_directory':str(directory),'reason':'bounded scan limit reached'})
+        configured,diagnostics_extra=_config_draft_roots(files)
+        roots.extend(configured);diagnostics.extend(diagnostics_extra)
+        candidates=[base/'Projects'/'com.lveditor.draft' for base in bases]
+        known={os.path.normcase(str(Path(item['path']).resolve())) for item in roots}
         for root in candidates:
-            if root.is_dir() and (root/'root_meta_info.json').is_file():
-                roots.append({'path':str(root),'source':'existing directory and root marker; user may override','write_authorized':False})
+            if root.is_dir() and (root/'root_meta_info.json').is_file() and os.path.normcase(str(root.resolve())) not in known:
+                roots.append({'path':str(root.resolve()),'source':'existing default directory and root marker; configuration paths take priority','write_authorized':False})
+                known.add(os.path.normcase(str(root.resolve())))
+        unique=[];seen=set()
+        for item in roots:
+            key=os.path.normcase(item['path'])
+            if key not in seen:unique.append(item);seen.add(key)
+        roots=unique
     return {'host':host,'target':chosen,'apps':apps,'draft_roots':roots,'ffprobe':shutil.which('ffprobe'),
             'native_ui_compatibility':'unverified','windows_ui_verified':False,'writes_performed':False,
-            'note':'Discovery reads app metadata and directory markers only; absent/custom roots require an explicit existing override.'}
+            'config_diagnostics':diagnostics,
+            'note':'Read-only bounded config discovery; explicit/known config fields take priority over default roots. No registration or UI recognition is claimed.'}
 
 
 def relocate_plain(candidate, destination):
@@ -481,6 +675,12 @@ def install(project,draft_root):
     report=validate(project);need(not report['errors'],'Candidate validation failed: '+'; '.join(report['errors']))
     manifest=read(project/'generation-manifest.json')
     need(manifest['project_kind']=='full','Pilot cannot be installed as a formal deliverable')
+    host={'Darwin':'mac','Windows':'windows'}.get(platform.system())
+    need(host is not None,'Native install requires a supported mac or windows host')
+    need(manifest.get('platform')==host,'Candidate platform differs from this host; rebuild for the target platform, do not rename files')
+    expected_content='draft_info.json' if host=='mac' else 'draft_content.json'
+    need(manifest.get('content_file')==expected_content and (project/expected_content).is_file(),
+         'Candidate main file does not match target platform')
     destination=root/safe_name(manifest['name']);need(not destination.exists(),'Name collision: refusing overwrite')
     need(not project.is_relative_to(root) and not root.is_relative_to(project),'Candidate must be external to live draft root')
     stage=Path(tempfile.mkdtemp(prefix='.new-native-',dir=root))
@@ -527,8 +727,12 @@ def snapshot(project,output,saved_and_closed=False):
 
 
 def main(argv=None):
+    # Deterministic UTF-8 JSON when Windows redirects stdout using a legacy code page.
+    for stream in (sys.stdout,sys.stderr):
+        if hasattr(stream,'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='command',required=True)
-    d=sub.add_parser('discover');d.add_argument('--platform',choices=['mac','windows']);d.add_argument('--app-path');d.add_argument('--draft-root')
+    d=sub.add_parser('discover');d.add_argument('--platform',choices=['mac','windows']);d.add_argument('--app-path');d.add_argument('--draft-root');d.add_argument('--config-file',action='append',help='explicit small JSON/INI containing actual draft path fields')
     b=sub.add_parser('build')
     for flag in ['timeline','approval-report','output','name']:b.add_argument('--'+flag)
     b.add_argument('--platform',choices=['mac','windows']);b.add_argument('--registered-root');b.add_argument('--ffprobe')
@@ -546,7 +750,7 @@ def main(argv=None):
                 if getattr(args,field,None) is None:setattr(args,field,defaults.get(field))
             need(all(getattr(args,x,None) for x in ['timeline','approval_report','output','name','platform']), 'Build requires timeline, approval_report, output, name, platform')
             result=build(args.timeline,args.approval_report,args.output,args.name,args.platform,args.registered_root,args.ffprobe,project_config=args.project_config)
-        elif args.command=='discover':result=discover(args.platform,args.app_path,args.draft_root)
+        elif args.command=='discover':result=discover(args.platform,args.app_path,args.draft_root,args.config_file)
         elif args.command=='validate':
             result=validate(args.project,args.native_report)
             if args.report:

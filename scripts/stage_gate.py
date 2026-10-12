@@ -33,6 +33,7 @@ def validate_report(report_path, expected_stage, inputs, project_config=None, *,
         if not isinstance(report, dict):
             raise ValueError("report must be an object")
         errors = []
+        derived_counts = None
         if expected_stage == "jianying-project" and not all(key in inputs for key in ("project", "manifest", "native_export")):
             errors.append("native gate requires project, manifest and native_export version inputs")
         normalized_stage = "analysis" if expected_stage == "analyze" else expected_stage
@@ -56,8 +57,10 @@ def validate_report(report_path, expected_stage, inputs, project_config=None, *,
                     else:
                         resolution_path = report_path.parent / resolution["path"]
                         resolution_hash = resolution["sha256"]
-                errors.extend(validate_review(report_path.parent / reference["path"], inputs["source"],
-                                              resolution_path, reference.get("sha256"), resolution_hash))
+                reviewed=validate_review(report_path.parent / reference["path"], inputs["source"],
+                                         resolution_path, reference.get("sha256"), resolution_hash, return_details=True)
+                errors.extend(reviewed['errors'])
+                derived_counts=reviewed['blocking_counts']
         if expected_stage == "jianying-project":
             if report.get("project_kind") != "full":
                 errors.append("native acceptance requires a full project, not a pilot")
@@ -96,6 +99,10 @@ def validate_report(report_path, expected_stage, inputs, project_config=None, *,
             value = counts.get(key)
             if type(value) is not int or value != 0:
                 errors.append(f"blocking count must be recorded as zero: {key}")
+        if derived_counts is not None:
+            for key in ('unresolved','known_unfixed'):
+                if counts.get(key) != derived_counts.get(key):
+                    errors.append('reported blocking count differs from derived review state: '+key)
         context = resolve_workflow(report.get("workflow"), report_path.parent, project_config,
                                    live_config_required=live_config_required)
         errors.extend(context["errors"])

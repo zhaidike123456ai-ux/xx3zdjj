@@ -122,14 +122,17 @@ class AnalysisToCaptionsTests(unittest.TestCase):
         evidence=self.root/'synthetic_listening.txt'
         evidence.write_text('SYNTHETIC PROTOCOL FIXTURE ONLY: not a real user, no person listened to tones.\n模拟确认仅验证闸门，不能用于真实视频。',encoding='utf-8')
         reviewer={'kind':'user','method':'user_listening','quote':'SYNTHETIC fixture listening statement, not real listening','recorded_at':'synthetic_fixture_timestamp'}
-        hashed=[{'path':str(evidence),'sha256':pipeline.sha256(evidence),'kind':'listening_confirmation'}]
-        resolutions={'schema_version':1,'source_sha256':pipeline.sha256(self.media),
+        resolutions={'schema_version':2,'source_sha256':pipeline.sha256(self.media),
                      'report_sha256':pipeline.sha256(self.residual/'review-report.json'),
-                     'alerts':[{'alert_id':a['id'],'outcome':'false_positive','assessment':'SYNTHETIC tone/ASR fixture explicitly assessed, not real speech',
-                                'reviewer':reviewer,'evidence':copy.deepcopy(hashed)} for a in self.review['alerts']],
-                     'check_resolutions':[{'check_id':key,'outcome':'verified','coverage':full_coverage(self.review['duration_seconds']),
+                     'alerts':[{'alert_id':a['id'],'decision':'retain','verification':'confirmed_benign',
+                                'coverage':{'scope':'alert_window','start':a['start'],'end':a['end']},
+                                'assessment':'SYNTHETIC tone/ASR fixture explicitly assessed, not real speech',
+                                'reviewer':reviewer} for a in self.review['alerts']],
+                     'check_resolutions':[{'check_id':key,'verification':'confirmed','coverage':full_coverage(self.review['duration_seconds']),
                                            'assessment':'SYNTHETIC full media protocol supplement; not actual listening',
-                                           'reviewer':reviewer,'evidence':copy.deepcopy(hashed)} for key in REQUIRED_CHECKS]}
+                                           'reviewer':reviewer} for key in REQUIRED_CHECKS]}
+        for item in resolutions['alerts']+resolutions['check_resolutions']:
+            item['evidence']=self.resolution_evidence(item,kind='listening_confirmation')
         self.resolutions=self.root/'resolutions.json';write_json(self.resolutions,resolutions)
         gate={'stage':'rough-cut','artifacts':{'source':{'sha256':pipeline.sha256(self.media)}},
               'checks':{key:{'status':'passed','method':'SYNTHETIC protocol fixture only','evidence':[str(evidence)]} for key in CHECKS['rough-cut']},
@@ -141,6 +144,18 @@ class AnalysisToCaptionsTests(unittest.TestCase):
         self.script=self.root/'script.txt';self.script.write_text('我测试通过\n',encoding='utf-8')
         self.caption_transcript=self.root/'caption_transcript.json';write_json(self.caption_transcript,self.whole_transcript(self.media))
         return gate,resolutions,evidence
+
+    def resolution_evidence(self,item,kind='machine_verification'):
+        """Scoped synthetic observations, never a claim that real audio was heard."""
+        key='alert_id' if 'alert_id' in item else 'check_id'
+        target=item[key];coverage=copy.deepcopy(item['coverage'])
+        path=self.root/('synthetic_'+kind+'_'+target+'.json')
+        write_json(path,{'schema_version':2,'kind':kind,
+            'source_sha256':pipeline.sha256(self.media),'report_sha256':pipeline.sha256(self.residual/'review-report.json'),
+            key:target,'coverage':coverage,'verification':item['verification'],
+            'observations':[{'method':'SYNTHETIC tone/ASR fixture timing and edit-map comparison',
+                'finding':f'SYNTHETIC fixture only: target {target} covers {coverage["start"]:.6f}-{coverage["end"]:.6f}s in the generated media; fixture mapping and word records support {item["verification"]}. No real speech or listening acceptance.'}]})
+        return [{'kind':kind,'path':str(path),'sha256':pipeline.sha256(path)}]
 
     def captions_cli(self, suffix='captions'):
         out=self.root/suffix
@@ -269,7 +284,7 @@ class AnalysisToCaptionsTests(unittest.TestCase):
             item['reviewer']={'kind':'agent','method':'machine_evidence_review',
                 'recorded_at':'synthetic','quote':'Synthetic timing, coverage and source mapping reviewed.'}
             item['assessment']='Synthetic machine evidence covers this item; no listening claim.'
-            item['evidence']=[{'kind':'machine_verification','path':str(evidence),'sha256':pipeline.sha256(evidence)}]
+            item['evidence']=self.resolution_evidence(item)
         write_json(self.resolutions,resolutions)
         gate['residual_review']['resolutions']['sha256']=pipeline.sha256(self.resolutions)
         # Semi-auto still needs the stage approval, but that approval is not listening proof.

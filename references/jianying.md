@@ -85,3 +85,11 @@ validate 的 `STATIC_VALIDATED_NATIVE_UI_PENDING` 仅说明文件哈希、素材
 Mac 候选输出 draft_info.json；Windows 候选输出 draft_content.json。Windows 只完成候选结构测试，没有本次 Windows UI、保存重开或原生导出证据，不宣称兼容。Mac 本次成功也不能推广到别的版本。
 
 用户授权兼容探索后，未知格式每个具体问题最多两轮针对性尝试，保留失败证据后停止猜改。PR／FCP XML 只是后续探索路线：本版没有实现或验证这些导出／导入，不写“支持”。若本机软件确有可验证交换格式，再按用户所选范围在新测试工程验证并记录损失。中立 timeline、素材清单、字幕与批准预览供重建，不等同于已可跨平台直接打开。
+
+## 2.3.0 路径发现与字幕样式
+
+`discover`优先读取已知User Data/Config中的小型JSON/INI明确草稿字段，也支持重复`--config-file /path/to/settings.json`。路径须存在并有草稿根标记，结果保存来源；显式`--draft-root`仍可覆盖。不盲写全局索引、不猜建目录。安装核对本机平台与工程主文件；跨平台构建仍支持，但在目标电脑实际导入后才能称兼容。
+
+ASS和剪映的字号单位不直接等价。timeline的`layout.caption.shadow`可指定原生字段 enabled、diffuse、alpha、distance、angle、color；省略时保留旧默认。`layout.caption.style_profile`可复用shadow与历史calibration（status/platform/app_version/font_name/font_version/evidence）。声称calibrated须有实际hash证据，构建会冻结小型证据副本；当前平台/字体匹配与像素一致仍不自动认证。不要把某一帧的宽高差比例作为通用系数。
+
+首次有样式差异时仅对对应字体和剪映版本做一次有限同帧校准，保存可复用记录；不增加导出视频、反复重开或每个项目重复整套验收。成功导入即可按既定条件交付。

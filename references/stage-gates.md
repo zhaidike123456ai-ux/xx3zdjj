@@ -57,24 +57,6 @@
 
 残留报告必须保留 `source_review_lineage` 的分析报告和 edit-map 引用及 hash，绑定同一原片与当前成片。每个上游警报的保留分片或删除后衔接处都要进入当前复核。移走成片导致引用丢失不能当作无报警。
 
-处理记录结构示意（占位内容不能用于通过检查）：
+2.3.0 新报告和处理记录使用 [机器证据协议v2](review-evidence-v2.md)。警报分别记录 decision 与 verification；不确定保留不等于已确认误报。证据绑定当前源、目标警报/检查及实际覆盖范围。检查器派生未决数并核对阶段计数，不接受手填零掩盖问题。
 
-```json
-{
-  "schema_version": 1,
-  "source_sha256": "当前成片SHA256",
-  "report_sha256": "残留报告SHA256",
-  "alerts": [{
-    "alert_id": "报告中的真实警报ID",
-    "outcome": "retain_normal_repetition",
-    "assessment": "填写该警报的具体结论：哪些分窗、词时间和剪辑映射支持保留该重复，以及是否仍有异常",
-    "reviewer": {"kind": "agent", "method": "machine_evidence_review", "recorded_at": "实际时间", "quote": "代理对本警报机器证据的实际审查摘要"},
-    "evidence": [{"path": "machine_verification.json", "sha256": "实际证据文件SHA256", "kind": "machine_verification"}]
-  }],
-  "check_resolutions": []
-}
-```
-
-`check_resolutions` 用于有新机器证据可补核的未验证检查：每项包含 `check_id`、`outcome: verified`、实际完整覆盖 `coverage: {scope: full_media, start: 0, end: 实际时长}`，以及同样的 `assessment/reviewer/evidence`。新记录使用 `kind: agent`、`method: machine_evidence_review`，包含 `recorded_at/quote`，至少一项 `kind: machine_verification` 证据带真实 `path/sha256`。证据须说明本检查的具体范围和结论，不把一份无对应关系的 ASR 文本当万能证明。旧的真实用户或代理听校记录可兼容保留；没有实际听校时不能伪造 `user_listening`、`agent_audio_listening`、`agent_av_review` 或音频 `capability`，也不要求为了推进补做听校。
-
-`fixed` 不能关闭旧媒体上的警报；修改媒体后必须重新生成残留报告。未解决警报一条也不能用补核记录绕过。校验器只验证结构与证据一致性，不认证听懂声音，也不让静态结构检查冒充语音质量判断。见 [语音证据复核流程](speech-review.md)。
+旧v1报告留作历史查询，新推进须按实际机器证据形成v2结论；不为协议升级重剪未变媒体，也不要求实际听校。需要修复的警报先改媒体再生成新残留报告，不能在旧报告中写fixed消除。校验器检查记录与证据一致性，独立AI仍须检查实际内容。见 [语音证据复核](speech-review.md)。

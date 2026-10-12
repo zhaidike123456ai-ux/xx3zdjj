@@ -16,6 +16,7 @@ CHECK_STATUSES = ('executed', 'skipped', 'unavailable')
 CHECK_RESULTS = ('passed', 'review_required', 'failed', 'unverified')
 RETAIN_OUTCOMES = ('retain_normal_repetition', 'false_positive')
 EVIDENCE_KINDS = ('local_audio', 'listening_confirmation', 'machine_verification')
+REVIEW_SCHEMA_VERSION = 2
 
 
 def file_hash(path):
@@ -52,7 +53,7 @@ def machine_review_report(source, duration, checks, alerts):
         and coverage_is_full(checks[key].get('coverage'), float(duration))
         for key in REQUIRED_CHECKS
     )
-    return {'schema_version': 1, 'stage': 'residual-check', 'source': str(source),
+    return {'schema_version': REVIEW_SCHEMA_VERSION, 'stage': 'residual-check', 'source': str(source),
             'source_sha256': digest, 'duration_seconds': float(duration),
             'command_status': 'completed',
             'quality_status': 'review_required' if any(i.get('review_required') for i in items) else 'passed' if complete else 'unverified',
@@ -151,6 +152,82 @@ def human_resolution_errors(item, base):
     return errors
 
 
+def coverage_contains(value, target, duration):
+    """Evidence must cover the reviewed coordinates, not merely name a file."""
+    if not isinstance(value, dict) or not isinstance(target, dict):
+        return False
+    start, end = value.get('start'), value.get('end')
+    if not numeric(start) or not numeric(end) or not 0 <= start < end <= duration + .001:
+        return False
+    if target.get('scope') == 'full_media':
+        return coverage_is_full(value, duration)
+    if value.get('scope') not in ('alert_window', 'full_media'):
+        return False
+    if value.get('scope') == 'full_media' and not coverage_is_full(value, duration):
+        return False
+    if not numeric(target.get('start')) or not numeric(target.get('end')) or target['start'] >= target['end']:
+        return False
+    return start <= target['start'] + .001 and end >= target['end'] - .001
+
+
+def semantic_evidence_errors(item, base, source_digest, report_digest,
+                             target_key, target_id, target_coverage, duration):
+    """Validate scoped observations for v2; this does not authenticate their truth.
+
+    A machine evidence file is a structured observation record, not a receipt.
+    Historical listening remains optional, but a v2 listening record must also
+    carry the same version, target, coverage and observation bindings.
+    """
+    errors = []
+    if not coverage_contains(item.get('coverage'), target_coverage, duration):
+        errors.append('resolution coverage does not cover the current target scope')
+    evidence = item.get('evidence')
+    if not isinstance(evidence, list):
+        return errors
+    reviewer = item.get('reviewer', {})
+    machine = isinstance(reviewer, dict) and reviewer.get('method') == 'machine_evidence_review'
+    required_kind = 'machine_verification' if machine else 'listening_confirmation'
+    for reference in evidence:
+        if not isinstance(reference, dict) or reference.get('kind') != required_kind:
+            continue
+        path = Path(base) / reference.get('path', '')
+        if not path.is_file() or reference.get('sha256') != file_hash(path):
+            # The ordinary evidence validator reports missing/changed files.
+            continue
+        try:
+            record = load_object(path)
+        except (OSError, ValueError, TypeError) as error:
+            errors.append('semantic evidence must contain structured observations: ' + str(error))
+            continue
+        if record.get('schema_version') != REVIEW_SCHEMA_VERSION or record.get('kind') != required_kind:
+            errors.append('semantic evidence requires a v2 typed observation record')
+        if record.get('source_sha256') != source_digest:
+            errors.append('semantic evidence belongs to another source media version')
+        # A recorded report hash or target ID must bind the observations. Every
+        # supplied binding is checked; one correct field cannot excuse a stale one.
+        bound_report = record.get('report_sha256')
+        bound_target = record.get(target_key)
+        if not nonempty(bound_report) and not nonempty(bound_target):
+            errors.append('semantic evidence needs the current report hash or target ID')
+        if bound_report is not None and bound_report != report_digest:
+            errors.append('semantic evidence belongs to another residual report')
+        if bound_target is not None and bound_target != target_id:
+            errors.append('semantic evidence belongs to another ' + target_key)
+        other_key = 'check_id' if target_key == 'alert_id' else 'alert_id'
+        if other_key in record:
+            errors.append('semantic evidence target type does not match the resolution')
+        if not coverage_contains(record.get('coverage'), target_coverage, duration):
+            errors.append('semantic evidence coverage does not cover the current target scope')
+        if record.get('verification') != item.get('verification'):
+            errors.append('semantic evidence verification differs from the resolution')
+        observations = record.get('observations')
+        if (not isinstance(observations, list) or not observations or
+                any(not isinstance(value, dict) or not nonempty(value.get('method')) or
+                    not nonempty(value.get('finding')) for value in observations)):
+            errors.append('semantic evidence needs concrete observations with method and finding')
+    return errors
+
+
 def lineage_errors(report, source_digest, base):
     """An output-local ASR pass cannot erase its original source warnings."""
     lineage = report.get('source_review_lineage')
@@ -178,7 +255,7 @@ def lineage_errors(report, source_digest, base):
     recorded = mapping.get('analysis_review', {})
     if not isinstance(recorded, dict) or recorded.get('sha256') != lineage['report'].get('sha256'):
         errors.append('lineage analysis report is not the one recorded during rendering')
-    if upstream.get('schema_version') != 1 or upstream.get('stage') != 'analyze' or upstream.get('command_status') != 'completed':
+    if upstream.get('schema_version') not in (1, REVIEW_SCHEMA_VERSION) or upstream.get('stage') != 'analyze' or upstream.get('command_status') != 'completed':
         errors.append('legacy or incomplete source analysis cannot establish lineage')
     old_alerts = upstream.get('alerts')
     if not isinstance(old_alerts, list):
@@ -259,28 +336,51 @@ def lineage_errors(report, source_digest, base):
 
 
 def validate_review(report_path, source_path, resolutions_path=None,
-                    expected_report_sha256=None, expected_resolutions_sha256=None):
-    """Fail closed on legacy reports, missing coverage, unresolved alerts or stale evidence.
+                    expected_report_sha256=None, expected_resolutions_sha256=None,
+                    *, return_details=False, allow_legacy=False):
+    """Validate v2 semantics and derive unresolved counts from actual records.
 
-    `fixed` cannot erase a current-media alert: repair changes the media hash and
-    needs a fresh residual report. Retaining a normal repetition/false positive
-    requires a version-bound machine assessment or actual listening conclusion
-    and hashed evidence. Listening capability is not required for machine review.
+    The default return remains an error list for existing callers. With
+    return_details=True, counters and target IDs are included for stage gates.
+    allow_legacy is an explicit historical-reading option, never an upgrade:
+    legacy records are identified in the details and new v2 reports still need
+    v2 resolutions. A retained but inconclusive alert remains unresolved.
     """
+    unresolved_alerts, unverified_checks, known_unfixed = set(), set(), set()
+    schema_version, legacy = None, False
+
+    def finish(errors):
+        if not return_details:
+            return errors
+        return {'errors': errors, 'schema_version': schema_version, 'legacy': legacy,
+                'status': ('legacy_invalid' if errors else 'legacy_history') if legacy else ('blocked' if errors else 'passed'),
+                'unresolved_count': len(unresolved_alerts),
+                'unresolved_alert_ids': sorted(unresolved_alerts),
+                'unverified_check_count': len(unverified_checks),
+                'unverified_check_ids': sorted(unverified_checks),
+                'known_unfixed_count': len(known_unfixed),
+                'known_unfixed_alert_ids': sorted(known_unfixed),
+                'blocking_counts': {'unresolved': len(unresolved_alerts) + len(unverified_checks),
+                                    'known_unfixed': len(known_unfixed)}}
+
     try:
         report_path, source_path = Path(report_path).resolve(), Path(source_path).resolve()
         if not source_path.is_file():
-            return ['current review media missing']
+            return finish(['current review media missing'])
         if not report_path.is_file():
-            return ['residual review report missing']
+            return finish(['residual review report missing'])
         digest = file_hash(report_path)
         source_digest = file_hash(source_path)
         report = load_object(report_path)
         errors = []
+        schema_version = report.get('schema_version')
+        legacy = schema_version == 1
         if expected_report_sha256 is not None and digest != expected_report_sha256:
             errors.append('residual report changed or hash missing')
-        if report.get('schema_version') != 1 or report.get('stage') != 'residual-check':
+        if schema_version not in (1, REVIEW_SCHEMA_VERSION) or report.get('stage') != 'residual-check':
             errors.append('legacy or wrong residual review schema/stage')
+        elif legacy and not allow_legacy:
+            errors.append('legacy residual report requires explicit historical reading; create a v2 review for current progression')
         if report.get('source_sha256') != source_digest:
             errors.append('residual review belongs to another media version')
         if report.get('command_status') != 'completed':
@@ -315,28 +415,36 @@ def validate_review(report_path, source_path, resolutions_path=None,
                 errors.append('alert review_required must be explicit boolean: ' + aid)
             if not numeric(alert.get('start')) or not numeric(alert.get('end')) or not 0 <= alert['start'] < alert['end'] <= duration + 0.001:
                 errors.append('alert invalid source bounds: ' + aid)
-            # Explicit detector diagnostics need no review; detected issues cannot
-            # be hidden with review_required=false unless clearly typed informational.
             if alert.get('review_required') is False and alert.get('severity') != 'informational':
                 errors.append('non-informational alert cannot bypass review: ' + aid)
+            if alert.get('review_required') is True:
+                unresolved_alerts.add(aid)
         if report.get('quality_status') == 'review_required' and not any(a.get('review_required') is True for a in alert_by_id.values()) and not any(isinstance(c, dict) and c.get('result') == 'review_required' for c in checks.values()):
             errors.append('review_required status has no tracked issue; cannot treat as zero alerts')
         resolutions = {}
         resolution_base = report_path.parent
+        context_errors = []
         if resolutions_path:
             resolutions_path = Path(resolutions_path).resolve()
             resolutions = load_object(resolutions_path)
             resolution_base = resolutions_path.parent
             if expected_resolutions_sha256 is not None and file_hash(resolutions_path) != expected_resolutions_sha256:
-                errors.append('resolutions document changed or hash missing')
-            if resolutions.get('schema_version') != 1:
-                errors.append('invalid resolutions schema')
+                context_errors.append('resolutions document changed or hash missing')
+            allowed_schema = (1, REVIEW_SCHEMA_VERSION) if legacy and allow_legacy else (REVIEW_SCHEMA_VERSION,)
+            if resolutions.get('schema_version') not in allowed_schema:
+                context_errors.append('invalid resolutions schema; current progression requires v2 decision/verification')
             if resolutions.get('report_sha256') != digest:
-                errors.append('resolutions belong to another residual report')
+                context_errors.append('resolutions belong to another residual report')
             if resolutions.get('source_sha256') != source_digest:
-                errors.append('resolutions belong to another media version')
+                context_errors.append('resolutions belong to another media version')
+        errors.extend(context_errors)
+        semantic = not (legacy and allow_legacy and resolutions.get('schema_version') == 1)
         alert_resolutions = {}
-        for item in resolutions.get('alerts', []):
+        resolution_alerts = resolutions.get('alerts', [])
+        if not isinstance(resolution_alerts, list):
+            errors.append('alert resolutions must be a list')
+            resolution_alerts = []
+        for item in resolution_alerts:
             if not isinstance(item, dict) or not nonempty(item.get('alert_id')):
                 errors.append('invalid alert resolution')
                 continue
@@ -353,12 +461,33 @@ def validate_review(report_path, source_path, resolutions_path=None,
             if not resolution:
                 errors.append('unresolved review_required alert: ' + aid)
                 continue
-            if resolution.get('outcome') not in RETAIN_OUTCOMES:
-                errors.append('alert not validly retained; repair requires a fresh media/report: ' + aid)
-            for error in human_resolution_errors(resolution, resolution_base):
-                errors.append(aid + ': ' + error)
+            item_errors = human_resolution_errors(resolution, resolution_base)
+            if semantic:
+                decision, verification = resolution.get('decision'), resolution.get('verification')
+                if 'outcome' in resolution:
+                    item_errors.append('v2 decision/verification cannot be replaced or mixed with legacy outcome')
+                if decision not in ('retain', 'repair'):
+                    item_errors.append('alert needs a retain/repair decision independent of verification')
+                if verification not in ('confirmed_benign', 'confirmed_issue', 'inconclusive'):
+                    item_errors.append('alert needs an explicit evidence verification conclusion')
+                if verification == 'confirmed_issue':
+                    known_unfixed.add(aid)
+                if decision != 'retain' or verification != 'confirmed_benign':
+                    item_errors.append('unresolved alert: retaining inconclusive/confirmed-issue evidence is not clearance; repair requires a fresh media/report')
+                target = {'scope': 'alert_window', 'start': alert.get('start'), 'end': alert.get('end')}
+                item_errors.extend(semantic_evidence_errors(resolution, resolution_base, source_digest,
+                    digest, 'alert_id', aid, target, duration))
+            elif resolution.get('outcome') not in RETAIN_OUTCOMES:
+                item_errors.append('alert not validly retained; repair requires a fresh media/report')
+            if not item_errors and not context_errors:
+                unresolved_alerts.discard(aid)
+            errors.extend(aid + ': ' + error for error in item_errors)
         supplements = {}
-        for item in resolutions.get('check_resolutions', []):
+        check_resolutions = resolutions.get('check_resolutions', [])
+        if not isinstance(check_resolutions, list):
+            errors.append('check resolutions must be a list')
+            check_resolutions = []
+        for item in check_resolutions:
             if not isinstance(item, dict) or item.get('check_id') not in REQUIRED_CHECKS:
                 errors.append('invalid check supplement')
                 continue
@@ -370,6 +499,7 @@ def validate_review(report_path, source_path, resolutions_path=None,
             check = checks.get(key, {})
             if not isinstance(check, dict):
                 errors.append(key + ': malformed check')
+                unverified_checks.add(key)
                 continue
             valid_status = check.get('status') in CHECK_STATUSES
             valid_result = check.get('result') in CHECK_RESULTS
@@ -384,16 +514,30 @@ def validate_review(report_path, source_path, resolutions_path=None,
             relevant_alerts = [a for a in alert_by_id.values() if a.get('check_id') == key and a.get('review_required')]
             adequate = (check.get('status') == 'executed' and coverage_is_full(check.get('coverage'), duration)
                         and (check.get('result') == 'passed' or (check.get('result') == 'review_required' and bool(relevant_alerts))))
-            if adequate:
-                continue
             supplement = supplements.get(key)
+            if check.get('result') == 'failed':
+                errors.append(key + ': failed detector must be repaired/rerun; a review supplement cannot override failure')
+                unverified_checks.add(key)
+                continue
+            if adequate and not supplement:
+                continue
             if not supplement:
                 errors.append(key + ': full-media check coverage/result unverified; needs evidenced review supplement')
+                unverified_checks.add(key)
                 continue
-            if supplement.get('outcome') != 'verified' or not coverage_is_full(supplement.get('coverage'), duration):
-                errors.append(key + ': supplement lacks verified full-media coverage')
-            for error in human_resolution_errors(supplement, resolution_base):
-                errors.append(key + ': ' + error)
-        return errors
+            item_errors = human_resolution_errors(supplement, resolution_base)
+            if semantic:
+                if 'outcome' in supplement:
+                    item_errors.append('v2 verification cannot be replaced or mixed with legacy outcome')
+                if supplement.get('verification') != 'confirmed' or not coverage_is_full(supplement.get('coverage'), duration):
+                    item_errors.append('supplement lacks verified full-media coverage or is inconclusive/failed')
+                item_errors.extend(semantic_evidence_errors(supplement, resolution_base, source_digest,
+                    digest, 'check_id', key, full_coverage(duration), duration))
+            elif supplement.get('outcome') != 'verified' or not coverage_is_full(supplement.get('coverage'), duration):
+                item_errors.append('supplement lacks verified full-media coverage')
+            if item_errors or context_errors:
+                unverified_checks.add(key)
+            errors.extend(key + ': ' + error for error in item_errors)
+        return finish(errors)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
-        return ['invalid residual review state: ' + str(error)]
+        return finish(['invalid residual review state: ' + str(error)])

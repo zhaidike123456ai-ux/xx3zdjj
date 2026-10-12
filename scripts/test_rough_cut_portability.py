@@ -120,11 +120,14 @@ class RoughCutTests(unittest.TestCase):
         with decision.open("w",newline="", encoding="utf-8") as stream:
             writer=csv.DictWriter(stream,fieldnames=["candidate_id","candidate_type","delete_start","delete_end","acoustic_evidence"])
             writer.writeheader(); writer.writerow({"candidate_id":"FR1","candidate_type":"short_fragment_or_swallowed_restart",
-                                                  "delete_start":.6,"delete_end":1,"acoustic_evidence":str(evidence)})
+                                                  "delete_start":.5,"delete_end":1,"acoustic_evidence":str(evidence)})
         result=self.run_cut("--decision-file",str(decision),"--approve-candidate","FR1")
         self.assertEqual(result.returncode,0,result.stderr)
         edit=json.loads((self.output/"edit-map.json").read_text(encoding="utf-8"))
         self.assertAlmostEqual(edit["boundary_evidence"][0]["resolved_start"],13/24)
+        self.assertEqual(edit["boundary_evidence"][0]["authorized_start"],.5)
+        self.assertEqual(edit["boundary_evidence"][0]["authorized_end"],1)
+        self.assertAlmostEqual(edit["boundary_evidence"][0]["acoustic_start_adjustment"],13/24-.5)
 
     def test_short_restart_without_evidence_blocks(self):
         decision=self.root/"decisions.csv"
